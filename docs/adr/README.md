@@ -15,6 +15,7 @@ trade-off and an accident.
 | [0007](0007-clean-room-verification.md) | Self-containment is defined by clean-room CI verification, not local success | 6 |
 | [0008](0008-hand-written-yaml-emitter.md) | A hand-written YAML emitter rather than a dependency, for byte-stable output | 0 |
 | [0009](0009-lcsc-manual-first.md) | LCSC is manual-first; klm ships no unofficial-endpoint client | 2 |
+| [0010](0010-vendoring-leaves-unmanaged-libraries-linked.md) | Vendoring aborts on klm's own unresolved symbols, reports everyone else's | 4 |
 
 ## Format
 

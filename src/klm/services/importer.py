@@ -33,7 +33,7 @@ from klm.model import Confidence, Parameter, Part, PartStatus, SourceKind
 from klm.services.catalog import find_by_mpn, get_part, save_part
 from klm.store.assets import AssetKind, AssetStore
 
-__all__ = ["ImportReport", "ImportedSymbol", "import_symbol_library"]
+__all__ = ["ImportReport", "ImportedSymbol", "import_symbol", "import_symbol_library"]
 
 UNKNOWN_MANUFACTURER = "Unknown"
 
@@ -93,7 +93,9 @@ def import_symbol_library(
             report.skipped.append((name, "derived symbol (extends) is not yet supported"))
             continue
         try:
-            imported = _import_one(conn, store, symbol, name, schema, status, category)
+            imported = import_symbol(
+                conn, store, symbol, name, schema=schema, status=status, category=category
+            )
         except (ValueError, sqlite3.DatabaseError) as exc:
             # One unimportable symbol must not cost the other two hundred.
             report.skipped.append((name, str(exc)))
@@ -107,15 +109,23 @@ def _is_derived(symbol: SExp) -> bool:
     return symbol.find("extends", recursive=False) is not None
 
 
-def _import_one(
+def import_symbol(
     conn: sqlite3.Connection,
     store: AssetStore,
     symbol: SExp,
     name: str,
-    schema: FieldConfig,
-    status: PartStatus,
-    category: str | None,
+    *,
+    schema: FieldConfig | None = None,
+    status: PartStatus = PartStatus.DRAFT,
+    category: str | None = None,
 ) -> ImportedSymbol:
+    """Import one symbol node as a part.
+
+    Public because ``klm promote`` needs exactly this and nothing else: a
+    collaborator's symbol arriving from a project must land through the same
+    identity rules as one arriving from a library file.
+    """
+    schema = schema if schema is not None else Config().fields
     raw = sym.properties(symbol)
     resolved = _resolve_fields(raw, schema)
 

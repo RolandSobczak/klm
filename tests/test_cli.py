@@ -7,6 +7,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
+from tests.projects import make_project, schematic, seed_resistor
 
 from klm.assets.kicad_libs import default_libraries
 from klm.cad.freecad import FreeCadUnavailable
@@ -672,3 +673,114 @@ def test_convert_3d_without_freecad_degrades(
 
 def _no_freecad(*args: object, **kwargs: object) -> None:
     raise FreeCadUnavailable("freecadcmd was not found; 3D models stay as meshes.")
+
+
+# ---------------------------------------------------------------------------
+# vendor / sync / promote
+# ---------------------------------------------------------------------------
+
+
+def _vendored_project(home: Path, tmp_path: Path, capsys) -> Path:
+    """An initialised catalog with one approved part, and a project using it."""
+    assert main(["init"]) == EXIT_OK
+    paths = Paths(home)
+    conn = connect(paths.db)
+    try:
+        seed_resistor(AssetStore(paths.assets), conn)
+    finally:
+        conn.close()
+    root = make_project(tmp_path / "proj")
+    capsys.readouterr()
+    return root
+
+
+def test_vendor_and_sync_status_round_trip(home: Path, tmp_path: Path, capsys) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+
+    assert main(["vendor", "--project", str(root), "--with-3d"]) == EXIT_OK
+    assert "vendored 1 symbols" in capsys.readouterr().out
+
+    assert main(["sync", "status", "--project", str(root), "--exit-code"]) == EXIT_OK
+    assert "in step with the catalog" in capsys.readouterr().out
+
+
+def test_sync_status_json_lists_every_part(home: Path, tmp_path: Path, capsys) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+    main(["vendor", "--project", str(root)])
+    capsys.readouterr()
+
+    assert main(["sync", "status", "--project", str(root), "--format", "json"]) == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["library_name"] == "my-board"
+    assert payload["parts"][0]["state"] == "clean"
+
+
+def test_vendor_dry_run_writes_nothing(home: Path, tmp_path: Path, capsys) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+    assert main(["vendor", "--project", str(root), "--dry-run"]) == EXIT_OK
+    assert "nothing written" in capsys.readouterr().out
+    assert not (root / "klm.lock.json").exists()
+
+
+def test_vendor_reports_what_it_cannot_resolve(home: Path, tmp_path: Path, capsys) -> None:
+    """A half-vendored project opens for its author and for nobody else."""
+    assert main(["init"]) == EXIT_OK
+    root = make_project(tmp_path / "proj", sheet=schematic(klm_id=None))
+
+    assert main(["vendor", "--project", str(root)]) == EXIT_CHECK_FAILED
+    out = capsys.readouterr().out
+    assert "no approved catalog part" in out
+    assert not (root / "libraries").exists()
+
+
+def test_sync_status_flags_drift_with_exit_code(home: Path, tmp_path: Path, capsys) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+    main(["vendor", "--project", str(root)])
+    target = root / "libraries" / "my-board.pretty" / "R_0402_1005Metric.kicad_mod"
+    target.write_text(target.read_text(encoding="utf-8").replace("0.56", "0.60"), encoding="utf-8")
+    capsys.readouterr()
+
+    assert main(["sync", "status", "--project", str(root), "--exit-code"]) == EXIT_CHECK_FAILED
+    assert "project-ahead" in capsys.readouterr().out
+
+
+def test_sync_push_then_clean(home: Path, tmp_path: Path, capsys) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+    main(["vendor", "--project", str(root)])
+    target = root / "libraries" / "my-board.pretty" / "R_0402_1005Metric.kicad_mod"
+    target.write_text(target.read_text(encoding="utf-8").replace("0.56", "0.60"), encoding="utf-8")
+    capsys.readouterr()
+
+    assert main(["sync", "push", "--project", str(root)]) == EXIT_OK
+    assert main(["sync", "status", "--project", str(root), "--exit-code"]) == EXIT_OK
+
+
+def test_unvendor_restores_the_project(home: Path, tmp_path: Path, capsys) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+    before = (root / "my-board.kicad_sch").read_text(encoding="utf-8")
+    main(["vendor", "--project", str(root)])
+    capsys.readouterr()
+
+    assert main(["unvendor", "--project", str(root)]) == EXIT_OK
+    assert (root / "my-board.kicad_sch").read_text(encoding="utf-8") == before
+    assert not (root / "klm.lock.json").exists()
+
+
+def test_sync_adopt_rebuilds_the_lock(home: Path, tmp_path: Path, capsys) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+    main(["vendor", "--project", str(root)])
+    (root / "klm.lock.json").unlink()
+    capsys.readouterr()
+
+    assert main(["sync", "adopt", "--project", str(root)]) == EXIT_OK
+    assert "rebuilt the lock" in capsys.readouterr().out
+    assert (root / "klm.lock.json").exists()
+
+
+def test_promote_refuses_a_part_that_is_not_an_orphan(home: Path, tmp_path: Path, capsys) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+    main(["vendor", "--project", str(root)])
+    capsys.readouterr()
+
+    assert main(["promote", "RC0402FR-074K7L", "--project", str(root)]) == EXIT_CHECK_FAILED
+    assert "no orphan part matches" in capsys.readouterr().out

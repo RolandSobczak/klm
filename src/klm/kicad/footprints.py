@@ -23,6 +23,7 @@ __all__ = [
     "iter_pads",
     "layer_of",
     "model_paths",
+    "remove_model_nodes",
     "rewrite_model_paths",
     "segment_points",
 ]
@@ -62,30 +63,55 @@ def absolute_model_paths(doc: Document | SExp) -> list[str]:
 
 
 def rewrite_model_paths(
-    doc: Document | SExp, *, env_var: str = "KLM_3DMODELS", filename: str | None = None
+    doc: Document | SExp,
+    *,
+    env_var: str = "KLM_3DMODELS",
+    subdir: str = "",
+    filename: str | None = None,
 ) -> int:
-    """Point every model reference at ``${env_var}/<name>``.
+    """Point every model reference at ``${env_var}/<subdir>/<name>``.
 
     The basename is preserved unless ``filename`` overrides it, and the suffix
     is left alone — a footprint referencing a ``.wrl`` keeps referencing a
     ``.wrl`` until something actually converts it.
+
+    ``subdir`` exists for vendored projects, whose models sit at a fixed path
+    below ``${KIPRJMOD}`` rather than at the root of a variable of their own.
 
     Returns the number of references whose value actually changed, so a caller
     can tell "already correct" from "rewritten" — `klm lint --fix` reports a fix
     only when there was one.
     """
     root = doc.root if isinstance(doc, Document) else doc
+    prefix = f"${{{env_var}}}/{subdir.strip('/')}" if subdir else f"${{{env_var}}}"
     count = 0
     for node in root.find_all("model"):
         if len(node) < 2 or not isinstance(node[1], Atom):
             continue
         target = node[1]
         name = filename or PurePath(target.value.replace("\\", "/")).name
-        rewritten = f"${{{env_var}}}/{name}"
+        rewritten = f"{prefix}/{name}"
         if target.value != rewritten:
             target.value = rewritten
             count += 1
     return count
+
+
+def remove_model_nodes(doc: Document | SExp) -> int:
+    """Drop every ``(model ...)`` reference. Returns how many were removed.
+
+    Used when vendoring without 3D models: leaving the references behind would
+    give a collaborator a project whose every footprint points at a file the
+    repository does not contain.
+    """
+    root = doc.root if isinstance(doc, Document) else doc
+    before = len(root.children)
+    root.children = [
+        child
+        for child in root.children
+        if not (isinstance(child, SExp) and child.name == "model")
+    ]
+    return before - len(root.children)
 
 
 @dataclass(frozen=True, slots=True)

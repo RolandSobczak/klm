@@ -13,7 +13,15 @@ from pathlib import Path
 
 from klm.kicad.sexpr import Atom, Document, SExp, dumps, loads
 
-__all__ = ["LibEntry", "TableKind", "load_table", "read_entries", "upsert_entry"]
+__all__ = [
+    "LibEntry",
+    "TableKind",
+    "load_table",
+    "read_entries",
+    "remove_entry",
+    "upsert_entry",
+    "write_table",
+]
 
 
 class TableKind:
@@ -99,6 +107,31 @@ def upsert_entry(doc: Document, entry: LibEntry) -> bool:
 
     doc.root.children.append(_make_lib(entry))
     return True
+
+
+def remove_entry(doc: Document, name: str) -> bool:
+    """Delete one row by name. Returns True if the document changed.
+
+    Unvendoring uses this rather than deleting the table, because a project's
+    library table is the user's file and may well name libraries klm knows
+    nothing about.
+    """
+    keep = [
+        child
+        for child in doc.root.children
+        if not (isinstance(child, SExp) and child.name == "lib" and _entry_name(child) == name)
+    ]
+    if len(keep) == len(doc.root.children):
+        return False
+    doc.root.children = keep
+    return True
+
+
+def _entry_name(lib: SExp) -> str | None:
+    node = lib.find("name", recursive=False)
+    if node is not None and len(node) >= 2 and isinstance(node[1], Atom):
+        return node[1].value
+    return None
 
 
 def _field(name: str, value: str, *, first: bool = False) -> SExp:
