@@ -91,6 +91,19 @@ klm research review               Work the proposal queue
 klm ask <klm_id> "<question>"     Datasheet Q&A
 
 COST
+klm order plan --build "5xsensor-board:full,2xpsu-board" [--projects DIR] [--explain] [--save]
+klm order export <supplier> --order ID [--output DIR]
+klm order list [--state draft|placed|received] | mark-placed ID [--total N]
+klm order receive ID [--location "A/12"] [--partial PN:QTY ...]
+klm order pin <ID_OR_MPN> [--supplier tme]
+
+klm stock list [--location "A/*"] [--low] | where <ID_OR_MPN>
+klm stock adjust <ID_OR_MPN> --location "A/12" [--set N | --delta N]
+klm stock consume --build "1xsensor-board:full" | threshold <ID_OR_MPN> N
+
+klm labels print [--order ID] [--location GLOB] [--part ID_OR_MPN] [--format pdf|png]
+klm labels scan <SHORTID>
+
 klm cost project <name> --qty N
 klm cost history
 ```

@@ -12,9 +12,10 @@ KiCad standard-library reuse, the QA gate, FreeCAD mesh→STEP, `klm part add`, 
 library sync (`klm vendor` / `unvendor`, the lock file, `klm sync status|pull|push|resolve|adopt`,
 `klm promote`), fabrication output (`klm bom`, `klm fab`, preflight, fab profiles, the rotation
 correction table and `klm fab feedback`), and repository scaffolding and CI (`klm verify
---clean-room`, `klm scaffold`, `klm docs`, `klm report`, timestamp normalisation). **Q1, Q2, Q3 and Q11 are resolved; Q4 was checked and is
-still open, but no longer blocks anything shipped.** Phase 7 (ordering and inventory) is next;
-nothing blocks it, though **Q8 (VAT and import charges) shapes its cost modelling**.
+--clean-room`, `klm scaffold`, `klm docs`, `klm report`, timestamp normalisation), and ordering and
+inventory (`klm order plan|export|mark-placed|receive|pin`, `klm stock *`, `klm labels *`). **Q1, Q2, Q3 and Q11 are resolved; Q4 was checked and is
+still open, but no longer blocks anything shipped.** **Q8 is resolved too.** Phase 8 (the desktop
+app) is next; nothing blocks it, and everything it needs already works from the CLI.
 
 - `README.md` — entry point and documentation map
 - `docs/01`–`docs/15` — the design, one concern per document
@@ -138,6 +139,16 @@ These are the things that will bite an implementer who hasn't read the docs.
   has usually moved on.
 - **A fab package is written only if preflight passed.** A package that exists is one somebody will
   upload, so a half-checked one is worse than none. `--check` is the same code path, writing nothing.
+- **Supplier splitting needs *set* moves, not just single-line moves.** Crossing a free-shipping
+  threshold requires several lines to move together, and every intermediate state costs more than
+  either end — a one-line-at-a-time hill-climber sits in that valley and reports the greedy answer.
+- **Set `vat_rate` the same way on every supplier.** Omitting it on one tilts the landed-cost
+  comparison by the whole rate, which is the decision the number exists to inform.
+- **Receiving is the only operation that increments stock**, and only a genuine count stamps
+  `last_counted`. Ordering discounts an old count rather than trusting or ignoring it.
+- **Labels carry no barcode on purpose** (Q6): no scanner here can validate an ECC200 encoder, and
+  a barcode that passes a visual check and does not scan is the failure mode this project refuses
+  everywhere else. Do not add one without hardware to test against.
 - **`klm verify --clean-room` takes a project and nothing else — no connection, no config, no
   `Paths`.** The signature is the guarantee, and a test asserts it. A checker that could reach the
   catalog would pass on the one machine where passing means nothing. It deliberately does *not* run

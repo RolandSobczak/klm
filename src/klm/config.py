@@ -97,8 +97,10 @@ class SupplierConfig:
     shipping_flat: float = 0.0
     free_shipping_above: float | None = None
     vat_rate: float = 0.0
+    """VAT added to the quoted prices. Set it the same way on every supplier, or
+    the landed-cost comparison tilts toward whichever one it was omitted from."""
     import_charges: bool = False
-    """Whether customs duty and import VAT apply — an estimate klm labels as one."""
+    """Whether customs duty applies — an estimate klm labels as one."""
 
     @property
     def manual(self) -> bool:
@@ -170,6 +172,9 @@ def default_suppliers() -> dict[str, SupplierConfig]:
             currency="PLN",
             shipping_flat=15.0,
             free_shipping_above=250.0,
+            # TME's API quotes net prices, so a consumer pays this on top. A
+            # VAT-registered business should set it to 0 — and must set it to 0
+            # on *both* suppliers, or the comparison tilts (docs/14 Q8).
             vat_rate=0.23,
         ),
         "lcsc": SupplierConfig(
@@ -180,6 +185,11 @@ def default_suppliers() -> dict[str, SupplierConfig]:
             api_secret_ref="env:LCSC_API_SECRET",
             currency="USD",
             shipping_flat=12.0,
+            # Import VAT has had no de-minimis since July 2021: every parcel is
+            # taxed at the destination rate. Leaving this at zero while TME
+            # carried 23% made the imported supplier look cheaper than it is,
+            # which is precisely the comparison this figure exists to inform.
+            vat_rate=0.23,
             import_charges=True,
         ),
     }

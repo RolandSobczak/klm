@@ -191,6 +191,14 @@ what makes the phase-4 guarantee real rather than assumed. See
 **Done when:** a multi-project order goes from build plan to two submitted carts in under five
 minutes, and arriving parts get labelled and stocked in one pass.
 
+Verified end to end: plan → cart file → mark-placed → receive → stock → label sheet → scan the
+short ID back to the part and its drawer.
+
+**Labels ship without a Data Matrix**, which is a decision rather than an omission —
+[Q6](14-open-questions.md#q6) has never been answered and no test here can validate an encoder
+without a scanner to read its output. The short ID is readable, resolvable, and the layout reserves
+the space. See [10 §7](10-ordering-and-inventory.md#why-there-is-no-barcode-yet).
+
 *Solves [P4](01-vision-and-problems.md#p4--ordering-is-a-spreadsheet-exercise).*
 
 ## Phase 8 — Desktop app

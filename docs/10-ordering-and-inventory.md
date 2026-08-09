@@ -69,9 +69,11 @@ free-shipping threshold.
 The approach — appropriate to a problem with tens of lines, not thousands:
 
 1. Greedy seed: assign each line to its cheapest landed source.
-2. Local search: repeatedly try moving a line (or the cheapest set of lines) to the other
-   supplier, keep improvements. This is what discovers "move these three lines to TME to cross
-   the free-shipping threshold and save 15 PLN net".
+2. Local search: repeatedly try moving a line **and sets of lines** to the other supplier, keeping
+   improvements. The sets are not an optimisation — they are required. Crossing a free-shipping
+   threshold needs several lines to move together, and every intermediate state (some moved, some
+   not) costs *more* than either end, so a hill-climber taking one step at a time sits in that
+   valley and reports the greedy answer. klm tries the cheapest k lines to relocate, for every k.
 3. Report the result *with the alternatives*: "LCSC saves 4.20 PLN on this line but adds 3 weeks
    of lead time" — the sort of trade-off only the user can settle.
 
@@ -84,6 +86,13 @@ Hard constraints that override cost:
 ## 4. Cart export
 
 klm does not place orders. It produces carts a human reviews and submits.
+
+Every figure is an **estimate**, labelled as one, with its assumptions printed beside it. Rates are
+configuration and never code, which is not fastidiousness: the EU's €150 duty exemption ended on
+1 July 2026 and a €3 per-item duty replaced it, so anything hardcoded in June was wrong in July
+([Q8](14-open-questions.md#q8)). One consequence worth stating — **set `vat_rate` the same way on
+every supplier.** Omitting it on one tilts the comparison toward that supplier by the whole rate,
+which is exactly the decision the number exists to inform.
 
 | Supplier | Export format |
 |---|---|
@@ -141,18 +150,32 @@ Design:
 
 - Encode **only a short identifier** — a Crockford-Base32 shortening of `klm_id`, ~8 characters,
   collision-checked against the catalog. Not a URL.
-- **Data Matrix** rather than QR: significantly denser at small physical sizes and designed for
-  exactly this direct-part-marking use case.
+- ~~**Data Matrix** rather than QR~~ — **not implemented**, see below.
 - The human-readable portion carries what you actually need while standing at the drawer:
   value and package (`100nF 0402 X7R`), not the MPN — you can look that up, but you can't tell
   two drawers of ceramics apart without it.
 
 ```
 ┌──────────────┐
-│ ▞▚▞ 100nF    │   Data Matrix (~6×6 mm) + two text lines
-│ ▚▞▚ 0402 X7R │
+│ 100nF        │   two text lines + the short ID
+│ 0402 X7R     │
+│ ABC12345     │
 └──────────────┘
 ```
+
+### Why there is no barcode yet
+
+[Q6](14-open-questions.md#q6) records that nobody has confirmed a Data Matrix at ~6x6 mm is
+reliably scannable by the phone or scanner actually in use, and its own fallback position is "a
+human-readable short ID and no barcode, which is a smaller loss than it sounds". An ECC200 encoder
+is a few hundred lines of Reed-Solomon that **no test here can validate** — there is no scanner on
+this machine to read the output — and a barcode that looks right, passes a visual check and does not
+scan is the same failure this project refuses for chip land patterns, for `unchecked` QA results and
+for bundled rotation data.
+
+So the label carries the short ID in readable text, `klm labels scan ABC12345` resolves it, and the
+layout reserves the space. When a printer and a scanner exist to test against, the encoder drops in
+and nothing else changes.
 
 Output formats:
 
