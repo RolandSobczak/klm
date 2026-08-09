@@ -12,9 +12,10 @@ Two decisions worth stating:
 * **Every symbol is preserved verbatim as an asset.** The stored bytes are the
   original symbol, not a reconstruction, so nothing is lost to klm's
   understanding of the format being incomplete.
-* **A symbol that already carries `KLM_ID` keeps it.** Re-importing a library
-  klm generated updates those parts rather than duplicating them, which is what
-  makes import safe to run twice.
+* **A symbol that already carries `KLM_ID` keeps it**, and one that does not is
+  matched on manufacturer + MPN. Re-importing a library updates those parts
+  rather than duplicating them, and importing the same symbol from every
+  project that copied it converges on one part.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from klm.config import Config, FieldConfig
 from klm.kicad import symbols as sym
 from klm.kicad.sexpr import SExp, dumps_canonical, loads
 from klm.model import Confidence, Parameter, Part, PartStatus, SourceKind
-from klm.services.catalog import get_part, save_part
+from klm.services.catalog import find_by_mpn, get_part, save_part
 from klm.store.assets import AssetKind, AssetStore
 
 __all__ = ["ImportReport", "ImportedSymbol", "import_symbol_library"]
@@ -42,7 +43,7 @@ class ImportedSymbol:
     name: str
     klm_id: str
     created: bool
-    """False when an existing `KLM_ID` matched a part already in the catalog."""
+    """False when the symbol matched a part already in the catalog."""
 
 
 @dataclass
@@ -93,7 +94,8 @@ def import_symbol_library(
             continue
         try:
             imported = _import_one(conn, store, symbol, name, schema, status, category)
-        except ValueError as exc:
+        except (ValueError, sqlite3.DatabaseError) as exc:
+            # One unimportable symbol must not cost the other two hundred.
             report.skipped.append((name, str(exc)))
             continue
         report.imported.append(imported)
@@ -117,11 +119,21 @@ def _import_one(
     raw = sym.properties(symbol)
     resolved = _resolve_fields(raw, schema)
 
+    mpn = resolved.get("MPN", "").strip() or resolved.get("Value", "").strip() or name
+    manufacturer = resolved.get("Manufacturer", "").strip() or UNKNOWN_MANUFACTURER
+
     klm_id = resolved.get(field_schema.KLM_ID, "").strip()
     if klm_id and not ids.is_valid(klm_id):
         raise ValueError(f"KLM_ID {klm_id!r} is not a valid identifier")
-    existing = get_part(conn, klm_id) if klm_id else None
-    if not klm_id:
+
+    # Identity, in descending order of certainty: the id the symbol carries,
+    # then manufacturer + MPN. The second matters because the same symbol is
+    # routinely copied into every project that uses it, and importing those
+    # libraries must converge on one part rather than collide.
+    existing = get_part(conn, klm_id) if klm_id else find_by_mpn(conn, manufacturer, mpn)
+    if existing is not None:
+        klm_id = existing.klm_id
+    elif not klm_id:
         klm_id = ids.new_id()
 
     symbol_hash = store.add_bytes(dumps_canonical(symbol).encode("utf-8"), AssetKind.SYMBOL)
@@ -130,8 +142,8 @@ def _import_one(
         klm_id=klm_id,
         # The symbol name is the fallback MPN: for a library of hand-drawn
         # parts it is usually the closest thing to one that exists.
-        mpn=resolved.get("MPN", "").strip() or resolved.get("Value", "").strip() or name,
-        manufacturer=resolved.get("Manufacturer", "").strip() or UNKNOWN_MANUFACTURER,
+        mpn=mpn,
+        manufacturer=manufacturer,
         description=resolved.get("Description", "").strip(),
         category=category or (existing.category if existing else None),
         package=resolved.get("Package", "").strip() or None,

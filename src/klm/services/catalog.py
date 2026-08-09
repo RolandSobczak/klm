@@ -8,7 +8,15 @@ from datetime import UTC, datetime
 from klm.model import Confidence, Lifecycle, Parameter, Part, PartStatus, SourceKind
 from klm.store.db import transaction
 
-__all__ = ["CatalogError", "count_parts", "delete_part", "get_part", "list_parts", "save_part"]
+__all__ = [
+    "CatalogError",
+    "count_parts",
+    "delete_part",
+    "find_by_mpn",
+    "get_part",
+    "list_parts",
+    "save_part",
+]
 
 
 class CatalogError(Exception):
@@ -229,6 +237,21 @@ def get_part(conn: sqlite3.Connection, klm_id: str) -> Part | None:
         if row is None:
             return None
     return _row_to_part(conn, row)
+
+
+def find_by_mpn(conn: sqlite3.Connection, manufacturer: str, mpn: str) -> Part | None:
+    """The live part with this manufacturer and MPN, if there is one.
+
+    `(manufacturer, mpn)` is unique among non-deprecated parts, so this is the
+    identity check for a part that arrives without a `KLM_ID` — importing the
+    same symbol from a second project's library must find the first one rather
+    than colliding with it.
+    """
+    row = conn.execute(
+        f"{_SELECT} WHERE p.mpn = ? AND m.normalized = ? AND p.status != 'deprecated'",
+        (mpn, normalize_manufacturer(manufacturer)),
+    ).fetchone()
+    return _row_to_part(conn, row) if row is not None else None
 
 
 def list_parts(

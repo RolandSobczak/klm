@@ -131,6 +131,23 @@ def test_reimport_updates_rather_than_duplicates(
     assert len(list_parts(conn)) == 2
 
 
+def test_the_same_symbol_from_two_libraries_is_one_part(
+    env: tuple[Paths, sqlite3.Connection, AssetStore],
+) -> None:
+    """The same symbol is copied into every project that uses it.
+
+    Without matching on manufacturer + MPN the second library collides with
+    the first on the `(manufacturer, mpn)` unique index and the import dies.
+    """
+    _, conn, store = env
+    import_symbol_library(conn, store, DRIFTED, config=config())
+    second = import_symbol_library(conn, store, DRIFTED, config=config())
+
+    assert second.created == 0
+    assert second.updated == 2
+    assert len(list_parts(conn)) == 2
+
+
 def _by_mpn(conn: sqlite3.Connection, mpn: str) -> Part:
     matches = [part for part in list_parts(conn) if part.mpn == mpn]
     assert matches, f"no part with MPN {mpn}"
