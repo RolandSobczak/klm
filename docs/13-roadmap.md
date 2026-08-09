@@ -46,7 +46,13 @@ Deliberately early — every later phase produces data, and it should be produce
 - MPN↔offer matching with confidence
 - `klm refresh`, `klm offers`, lint rule group P
 
-**Done when:** every part in the catalog shows live stock and price from both suppliers.
+**Done when:** ~~every part in the catalog shows live stock and price from both suppliers~~ — every
+part shows stock and price from TME live, and from LCSC as entered.
+
+The original criterion assumed live LCSC data, which [Q2](14-open-questions.md#q2) established klm's
+users cannot have: LCSC grants API access per company, not per person. Manual entry is therefore
+the primary LCSC path ([ADR-0009](adr/0009-lcsc-manual-first.md)), and a manually entered offer is
+a first-class offer — it ages, lints and orders exactly like a fetched one.
 
 ## Phase 3 — Asset pipeline
 

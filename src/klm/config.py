@@ -11,6 +11,7 @@ would mean adding one local spelling silently switched off the other forty.
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -18,9 +19,19 @@ from typing import Any
 
 from klm import fields
 
-__all__ = ["Config", "ConfigError", "FieldConfig", "LintConfig", "load_config"]
+__all__ = [
+    "Config",
+    "ConfigError",
+    "FieldConfig",
+    "LintConfig",
+    "SupplierConfig",
+    "load_config",
+    "resolve_secret",
+]
 
 DEFAULT_MAX_SEVERITY = "error"
+DEFAULT_STALE_DAYS = 30
+ENV_PREFIX = "env:"
 
 
 class ConfigError(Exception):
@@ -64,13 +75,72 @@ class LintConfig:
 
 
 @dataclass(frozen=True)
+class SupplierConfig:
+    """One `[suppliers.<name>]` block (docs/07 §7).
+
+    Credentials are *references* to environment variables, never the secrets
+    themselves. `config.toml` lives in a directory users are encouraged to put
+    under git; a file format that invites pasting an API key into it is a file
+    format that leaks API keys.
+    """
+
+    name: str
+    enabled: bool = False
+    mode: str = "api"
+    """`api` | `manual`. `manual` means klm never calls out for this supplier."""
+    api_key_ref: str | None = None
+    api_secret_ref: str | None = None
+    currency: str = "PLN"
+    rate_per_second: float = 2.0
+    """Deliberately conservative. Being throttled is a self-inflicted outage."""
+    burst: float = 4.0
+    shipping_flat: float = 0.0
+    free_shipping_above: float | None = None
+    vat_rate: float = 0.0
+    import_charges: bool = False
+    """Whether customs duty and import VAT apply — an estimate klm labels as one."""
+
+    @property
+    def manual(self) -> bool:
+        return self.mode == "manual"
+
+    def credentials(self) -> tuple[str | None, str | None]:
+        """Resolve the key and secret from the environment, at the point of use."""
+        return resolve_secret(self.api_key_ref), resolve_secret(self.api_secret_ref)
+
+    def has_credentials(self) -> bool:
+        key, secret = self.credentials()
+        return bool(key and secret)
+
+
+@dataclass(frozen=True)
 class Config:
     fields: FieldConfig = field(default_factory=FieldConfig)
     lint: LintConfig = field(default_factory=LintConfig)
+    suppliers: dict[str, SupplierConfig] = field(default_factory=dict)
+    stale_days: int = DEFAULT_STALE_DAYS
+    """Age past which `klm lint` calls an offer stale (P003)."""
     significant_figures: int = 3
     """Significant figures in formatted values."""
     source: Path | None = None
     """Where this came from, for error messages. ``None`` means defaults only."""
+
+    def enabled_suppliers(self) -> list[SupplierConfig]:
+        return [s for s in self.suppliers.values() if s.enabled]
+
+
+def resolve_secret(reference: str | None) -> str | None:
+    """Read a `env:NAME` reference. A literal is returned as-is but discouraged.
+
+    Returning ``None`` for an unset variable rather than raising is deliberate:
+    a supplier whose key is missing is a supplier klm reports as unconfigured,
+    not a crash on startup for users who only enabled one of the two.
+    """
+    if not reference:
+        return None
+    if reference.startswith(ENV_PREFIX):
+        return os.environ.get(reference[len(ENV_PREFIX) :].strip()) or None
+    return reference
 
 
 def default_aliases() -> dict[str, str]:
@@ -82,6 +152,39 @@ def default_aliases() -> dict[str, str]:
     return table
 
 
+def default_suppliers() -> dict[str, SupplierConfig]:
+    """The two suppliers klm ships knowing about (docs/01 — P1).
+
+    TME defaults to API mode and is inert until credentials exist. LCSC
+    defaults to **manual** mode, because LCSC's API is granted per company
+    rather than per person and klm must be fully useful to someone who will
+    never be granted it (docs/adr/0009).
+    """
+    return {
+        "tme": SupplierConfig(
+            name="tme",
+            enabled=True,
+            mode="api",
+            api_key_ref="env:TME_API_KEY",
+            api_secret_ref="env:TME_API_SECRET",
+            currency="PLN",
+            shipping_flat=15.0,
+            free_shipping_above=250.0,
+            vat_rate=0.23,
+        ),
+        "lcsc": SupplierConfig(
+            name="lcsc",
+            enabled=True,
+            mode="manual",
+            api_key_ref="env:LCSC_API_KEY",
+            api_secret_ref="env:LCSC_API_SECRET",
+            currency="USD",
+            shipping_flat=12.0,
+            import_charges=True,
+        ),
+    }
+
+
 def load_config(path: Path | None) -> Config:
     """Read `config.toml`, or return defaults when it is absent.
 
@@ -91,7 +194,7 @@ def load_config(path: Path | None) -> Config:
     """
     aliases = default_aliases()
     if path is None or not path.exists():
-        return Config(fields=FieldConfig(aliases=aliases))
+        return Config(fields=FieldConfig(aliases=aliases), suppliers=default_suppliers())
 
     try:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -126,12 +229,71 @@ def load_config(path: Path | None) -> Config:
     if not isinstance(significant, int) or not 1 <= significant <= 6:
         raise ConfigError(f"{path}: significant_figures must be an integer between 1 and 6")
 
+    suppliers = _suppliers(_table(data, "suppliers", path), path)
+
+    sourcing = _table(data, "sourcing", path)
+    stale_days = sourcing.get("stale_days", DEFAULT_STALE_DAYS)
+    if not isinstance(stale_days, int) or stale_days < 1:
+        raise ConfigError(f"{path}: [sourcing] stale_days must be a positive integer")
+
     return Config(
         fields=FieldConfig(aliases=aliases, custom=custom),
         lint=lint,
+        suppliers=suppliers,
+        stale_days=stale_days,
         significant_figures=significant,
         source=path,
     )
+
+
+_SUPPLIER_MODES = ("api", "manual")
+
+
+def _suppliers(section: dict[str, Any], path: Path) -> dict[str, SupplierConfig]:
+    """Merge `[suppliers.*]` onto the built-in defaults, block by block.
+
+    Merged rather than replaced for the same reason field aliases are: a user
+    setting one key on TME should not silently reset its VAT rate to zero.
+    """
+    suppliers = default_suppliers()
+    for name, raw in section.items():
+        if not isinstance(raw, dict):
+            raise ConfigError(f"{path}: [suppliers.{name}] must be a table")
+        base = suppliers.get(name, SupplierConfig(name=name))
+        mode = str(raw.get("mode", base.mode))
+        if mode not in _SUPPLIER_MODES:
+            raise ConfigError(
+                f"{path}: [suppliers.{name}] mode must be one of {', '.join(_SUPPLIER_MODES)}"
+            )
+        for secret_key in ("api_key", "api_secret"):
+            value = raw.get(secret_key)
+            if isinstance(value, str) and value and not value.startswith(ENV_PREFIX):
+                raise ConfigError(
+                    f"{path}: [suppliers.{name}] {secret_key} must be an 'env:NAME' reference, "
+                    "not the secret itself"
+                )
+        suppliers[name] = SupplierConfig(
+            name=name,
+            enabled=bool(raw.get("enabled", base.enabled)),
+            mode=mode,
+            api_key_ref=str(raw.get("api_key", base.api_key_ref or "")) or None,
+            api_secret_ref=str(raw.get("api_secret", base.api_secret_ref or "")) or None,
+            currency=str(raw.get("currency", base.currency)),
+            rate_per_second=float(raw.get("rate_per_second", base.rate_per_second)),
+            burst=float(raw.get("burst", base.burst)),
+            shipping_flat=float(raw.get("shipping_flat", base.shipping_flat)),
+            free_shipping_above=_optional_float(raw, "free_shipping_above", base),
+            vat_rate=float(raw.get("vat_rate", base.vat_rate)),
+            import_charges=bool(raw.get("import_charges", base.import_charges)),
+        )
+    return suppliers
+
+
+def _optional_float(raw: dict[str, Any], key: str, base: SupplierConfig) -> float | None:
+    if key not in raw:
+        return base.free_shipping_above
+    value = raw[key]
+    return None if value is None else float(value)
 
 
 def _table(data: dict[str, Any], key: str, path: Path) -> dict[str, Any]:

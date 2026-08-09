@@ -18,19 +18,29 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from klm import __version__
-from klm.config import load_config
+from klm.config import Config, load_config
 from klm.environment import find_kicad_config, probe_all
 from klm.hooks import HOOK_BLOCK, HOOK_ID, PRE_COMMIT_CONFIG, PRE_COMMIT_TEMPLATE
-from klm.model import PartStatus
+from klm.model import Confidence, Offer, Part, PartStatus, PriceBreak
 from klm.serial.part_file import to_yaml
-from klm.services.catalog import list_parts
+from klm.services.catalog import get_part, list_parts
 from klm.services.exporter import PART_FILE, export_catalog, import_catalog
 from klm.services.generate import generate
 from klm.services.importer import import_symbol_library
 from klm.services.lint import RULES, LintReport, Selector, Severity, lint_catalog
+from klm.services.offers import (
+    TIMESTAMP_FORMAT,
+    delete_offer,
+    list_offers,
+    refresh_offers,
+    save_offer,
+    stale_part_ids,
+)
 from klm.services.register import apply_plan, plan_registration
 from klm.store import AssetKind, AssetStore, Paths, connect, migrate
 from klm.store.db import SCHEMA_VERSION, user_version
+from klm.suppliers.lcsc import is_lcsc_pn, product_url
+from klm.suppliers.registry import build_adapters
 
 EXIT_OK = 0
 EXIT_CHECK_FAILED = 1
@@ -146,6 +156,45 @@ def build_parser() -> argparse.ArgumentParser:
         help="Report whether the hook is configured; non-zero if it is not.",
     )
     hook.set_defaults(func=cmd_hook)
+
+    refresh = sub.add_parser("refresh", help="Re-read stock and prices from the suppliers.")
+    refresh.add_argument(
+        "--stale",
+        metavar="AGE",
+        help="Only parts whose offers are older than this, e.g. 7d, 24h.",
+    )
+    refresh.add_argument("--part", metavar="ID_OR_MPN", help="Only this part.")
+    refresh.add_argument("--supplier", metavar="NAME", help="Only this supplier.")
+    refresh.add_argument(
+        "--no-discover",
+        action="store_true",
+        help="Refresh existing links only; do not match new offers.",
+    )
+    refresh.add_argument(
+        "--offline",
+        action="store_true",
+        help="Serve from the HTTP cache only, never reaching the network.",
+    )
+    refresh.set_defaults(func=cmd_refresh)
+
+    offers = sub.add_parser("offers", help="Show, add or remove supplier offers.")
+    offers.add_argument("part", nargs="?", metavar="ID_OR_MPN", help="Limit to one part.")
+    offers.add_argument("--supplier", metavar="NAME", help="Limit to one supplier.")
+    offers.add_argument(
+        "--format", choices=("text", "json"), default="text", help="Output format."
+    )
+    offers.add_argument("--qty", type=int, default=1, help="Quantity to price at (default: 1).")
+    offers.add_argument(
+        "--add",
+        metavar="SUPPLIER_PN",
+        help="Record an offer by hand — the supported path for LCSC (docs/adr/0009).",
+    )
+    offers.add_argument("--remove", metavar="SUPPLIER_PN", help="Delete an offer.")
+    offers.add_argument("--price", type=float, help="With --add: unit price.")
+    offers.add_argument("--stock", type=int, help="With --add: units in stock.")
+    offers.add_argument("--moq", type=int, default=1, help="With --add: minimum order quantity.")
+    offers.add_argument("--currency", help="With --add: currency (default: the supplier's).")
+    offers.set_defaults(func=cmd_offers)
 
     gen = sub.add_parser("generate", help="Rebuild the KiCad libraries from the catalog.")
     gen.set_defaults(func=cmd_generate)
@@ -312,7 +361,8 @@ def _report_catalog(conn: sqlite3.Connection) -> int:
     problems = 0
     stale = conn.execute(
         "SELECT COUNT(DISTINCT klm_id) FROM offer "
-        "WHERE fetched_at < datetime('now', '-30 days')"
+        "WHERE fetched_at < strftime(?, 'now', '-30 days')",
+        (TIMESTAMP_FORMAT,),
     ).fetchone()[0]
     if stale:
         print(f"{_WARN} offers         {stale} parts have offers older than 30 days")
@@ -593,6 +643,212 @@ def cmd_hook(args: argparse.Namespace) -> int:
     print()
     print("Next: pre-commit install")
     return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# refresh / offers
+# ---------------------------------------------------------------------------
+
+_AGE_UNITS = {"d": 1.0, "h": 1.0 / 24.0, "w": 7.0}
+
+
+def parse_age(raw: str) -> int:
+    """`7d`, `24h`, `2w` → whole days, rounded up.
+
+    Rounded up because the threshold means "at least this fresh": asking for
+    `12h` and getting something 20 hours old would be a lie by rounding.
+    """
+    text = raw.strip().lower()
+    unit = text[-1] if text and text[-1] in _AGE_UNITS else "d"
+    number = text[:-1] if text and text[-1] in _AGE_UNITS else text
+    try:
+        value = float(number)
+    except ValueError as exc:
+        raise ValueError(f"cannot read {raw!r} as an age (try 7d, 24h, 2w)") from exc
+    if value <= 0:
+        raise ValueError(f"age must be positive, got {raw!r}")
+    return max(1, -(-int(value * _AGE_UNITS[unit] * 1000) // 1000))
+
+
+def _resolve_part(conn: sqlite3.Connection, reference: str) -> Part:
+    """Find a part by KLM_ID or MPN. Ambiguity is reported, never resolved."""
+    part = get_part(conn, reference)
+    if part is not None:
+        return part
+    matches = [p for p in list_parts(conn) if p.mpn.lower() == reference.lower()]
+    if not matches:
+        raise LookupError(f"no part with id or MPN {reference!r}")
+    if len(matches) > 1:
+        ids = ", ".join(p.klm_id for p in matches)
+        raise LookupError(f"{reference!r} matches several parts: {ids}")
+    return matches[0]
+
+
+def cmd_refresh(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    config = load_config(paths.config)
+
+    adapters = build_adapters(
+        config, paths.supplier_cache, offline=args.offline, only=args.supplier
+    )
+    if not adapters:
+        which = f" named {args.supplier}" if args.supplier else ""
+        print(f"{_WARN} no enabled supplier{which} — see [suppliers] in {paths.config}")
+        return EXIT_CHECK_FAILED
+
+    conn = connect(paths.db, create=False)
+    try:
+        parts = _refresh_targets(conn, config, args)
+        report = refresh_offers(conn, adapters, parts, discover=not args.no_discover)
+    finally:
+        conn.close()
+
+    for offer in report.discovered:
+        price = offer.unit_price()
+        detail = f"{price:.4f} {offer.currency}" if price is not None else "no price"
+        print(f"  linked  {offer.supplier}:{offer.supplier_pn}  {detail}")
+    for klm_id, offer, reason in report.proposed:
+        print(f"{_WARN} {klm_id}: {offer.supplier}:{offer.supplier_pn} not linked — {reason}")
+
+    print(
+        f"{_OK} {report.parts_checked} part(s): {len(report.refreshed)} offer(s) refreshed, "
+        f"{len(report.discovered)} newly linked"
+    )
+    if report.proposed:
+        print(f"{_INFO} {len(report.proposed)} candidate(s) need a human: klm offers --add")
+
+    for supplier, reason in report.unavailable:
+        print(f"{_FAIL} {supplier}: {reason}")
+    if report.unavailable:
+        print(f"{_INFO} cached offers are unchanged; klm keeps what it had")
+        return EXIT_CHECK_FAILED
+    return EXIT_OK
+
+
+def _refresh_targets(
+    conn: sqlite3.Connection, config: Config, args: argparse.Namespace
+) -> list[Part]:
+    if args.part:
+        return [_resolve_part(conn, args.part)]
+    if args.stale:
+        stale = set(stale_part_ids(conn, parse_age(args.stale)))
+        return [p for p in list_parts(conn) if p.klm_id in stale]
+    return [p for p in list_parts(conn) if p.status is not PartStatus.DEPRECATED]
+
+
+def cmd_offers(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    config = load_config(paths.config)
+
+    conn = connect(paths.db, create=False)
+    try:
+        if args.add:
+            return _offers_add(conn, config, args)
+        if args.remove:
+            if not args.supplier:
+                print("klm: --remove needs --supplier", file=sys.stderr)
+                return EXIT_ERROR
+            removed = delete_offer(conn, args.supplier, args.remove)
+            print(f"{_OK if removed else _WARN} {'removed' if removed else 'no such offer:'} "
+                  f"{args.supplier}:{args.remove}")
+            return EXIT_OK if removed else EXIT_CHECK_FAILED
+
+        klm_id = _resolve_part(conn, args.part).klm_id if args.part else None
+        offers = list_offers(conn, klm_id=klm_id, supplier=args.supplier)
+        parts = {p.klm_id: p for p in list_parts(conn)}
+    finally:
+        conn.close()
+
+    if args.format == "json":
+        print(_offers_json(offers, args.qty))
+        return EXIT_OK
+    return _print_offers(offers, parts, args.qty)
+
+
+def _offers_add(conn: sqlite3.Connection, config: Config, args: argparse.Namespace) -> int:
+    """`klm offers --add` — manual entry, first-class rather than a fallback.
+
+    This is the supported path for LCSC and the escape hatch for every supplier
+    klm has no adapter for. The confidence is `high` because a human made the
+    link, which is a better signal than any string comparison klm can make.
+    """
+    if not args.part or not args.supplier:
+        print("klm: --add needs a part and --supplier", file=sys.stderr)
+        return EXIT_ERROR
+
+    part = _resolve_part(conn, args.part)
+    supplier = config.suppliers.get(args.supplier)
+    offer = Offer(
+        supplier=args.supplier,
+        supplier_pn=args.add.strip(),
+        klm_id=part.klm_id,
+        mpn=part.mpn,
+        manufacturer=part.manufacturer,
+        description=part.description,
+        moq=args.moq,
+        stock=args.stock,
+        currency=args.currency or (supplier.currency if supplier else None),
+        price_breaks=[PriceBreak(args.moq, args.price)] if args.price is not None else [],
+        url=product_url(args.add) if args.supplier == "lcsc" and is_lcsc_pn(args.add) else None,
+        match_confidence=Confidence.HIGH,
+    )
+    save_offer(conn, offer)
+    print(f"{_OK} {part.klm_id} ({part.mpn}) ← {offer.supplier}:{offer.supplier_pn}")
+    return EXIT_OK
+
+
+def _print_offers(offers: list[Offer], parts: dict[str, Part], qty: int) -> int:
+    if not offers:
+        print(f"{_INFO} no offers recorded")
+        print("    → run: klm refresh, or record one: klm offers <part> --supplier lcsc --add C…")
+        return EXIT_OK
+
+    grouped: dict[str, list[Offer]] = {}
+    for offer in offers:
+        grouped.setdefault(offer.klm_id or "", []).append(offer)
+
+    for klm_id, group in sorted(grouped.items()):
+        part = parts.get(klm_id)
+        label = f"{part.mpn} ({part.manufacturer})" if part else klm_id
+        print(f"{label}  {klm_id}")
+        for offer in group:
+            price = offer.unit_price(qty)
+            # A price of "—" and a price of 0 must not look alike; the first
+            # means the supplier quoted nothing at this quantity.
+            money = f"{price:.4f} {offer.currency or ''}".strip() if price is not None else "—"
+            stock = "unknown" if offer.stock is None else str(offer.stock)
+            flag = "  [low confidence]" if offer.match_confidence is Confidence.LOW else ""
+            print(
+                f"    {offer.supplier:<6} {offer.supplier_pn:<18} "
+                f"{money:>14} @{qty:<6} stock {stock:>8}  {offer.fetched_at or 'never'}{flag}"
+            )
+        print()
+    return EXIT_OK
+
+
+def _offers_json(offers: list[Offer], qty: int) -> str:
+    payload = [
+        {
+            "supplier": o.supplier,
+            "supplier_pn": o.supplier_pn,
+            "klm_id": o.klm_id,
+            "mpn": o.mpn,
+            "manufacturer": o.manufacturer,
+            "packaging": str(o.packaging),
+            "moq": o.moq,
+            "stock": o.stock,
+            "currency": o.currency,
+            "unit_price": o.unit_price(qty),
+            "price_breaks": [[b.qty, b.unit_price] for b in o.sorted_breaks()],
+            "url": o.url,
+            "match_confidence": str(o.match_confidence),
+            "fetched_at": o.fetched_at,
+        }
+        for o in offers
+    ]
+    return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------

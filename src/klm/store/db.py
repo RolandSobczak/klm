@@ -197,8 +197,21 @@ CREATE INDEX event_log_subject ON event_log(subject);
 """
 
 
+# The supplier's own view of the part, kept alongside the offer it produced.
+# Without it a low-confidence match is unauditable: "klm thinks C25900 is this
+# resistor" is only checkable if the supplier's MPN and manufacturer are on the
+# row to compare against (docs/07 §5).
+_OFFER_PROVENANCE = """
+ALTER TABLE offer ADD COLUMN mpn TEXT;
+ALTER TABLE offer ADD COLUMN manufacturer TEXT;
+ALTER TABLE offer ADD COLUMN description TEXT NOT NULL DEFAULT '';
+ALTER TABLE offer ADD COLUMN datasheet_url TEXT;
+"""
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "initial schema", _INITIAL),
+    Migration(2, "offer provenance columns", _OFFER_PROVENANCE),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1].version

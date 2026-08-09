@@ -16,8 +16,11 @@ exactly until the next `klm generate`.
 
 from __future__ import annotations
 
+import re
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 
 from klm import fields as field_schema
@@ -26,8 +29,9 @@ from klm.config import Config
 from klm.kicad import footprints as fp
 from klm.kicad import symbols as sym
 from klm.kicad.sexpr import Document, SExp, dumps, loads
-from klm.model import Parameter, Part, PartStatus
+from klm.model import Confidence, Lifecycle, Offer, Parameter, Part, PartStatus
 from klm.services.catalog import list_parts, save_part
+from klm.services.offers import list_offers
 from klm.services.register import MODELS_VAR
 from klm.store.assets import AssetError, AssetKind, AssetStore
 from klm.units import Quantity, ValueParseError, format_quantity, parse_value, try_parse_value
@@ -70,6 +74,13 @@ _RULE_LIST = (
     Rule("A004", Severity.ERROR, "Referenced 3D model is missing from the store"),
     Rule("A005", Severity.WARNING, "Asset QA status is warn or fail"),
     Rule("A006", Severity.ERROR, "Referenced asset is missing from the store or unreadable"),
+    Rule("P001", Severity.WARNING, "No offer at any configured supplier"),
+    Rule("P002", Severity.WARNING, "Every offer shows zero stock"),
+    Rule("P003", Severity.WARNING, "Offers are older than the staleness threshold"),
+    Rule("P004", Severity.WARNING, "SMD part has no LCSC part number for JLCPCB assembly"),
+    Rule("P005", Severity.WARNING, "Lifecycle is obsolete or not recommended for new designs"),
+    Rule("P006", Severity.WARNING, "Datasheet URL is missing"),
+    Rule("P007", Severity.WARNING, "Offer is linked to this part at low confidence"),
 )
 
 RULES: dict[str, Rule] = {rule.id: rule for rule in _RULE_LIST}
@@ -186,6 +197,7 @@ def _lint_part(
     findings += _schema_rules(config, part, properties, where)
     findings += _value_rules(config, part, properties, where)
     findings += _asset_rules(conn, store, part, where)
+    findings += _sourcing_rules(conn, config, part, properties, where)
 
     symbol_changed = symbol is not None and fix and _fix_symbol(config, part, symbol, findings)
     footprint_doc = _fix_footprint(store, part, findings) if fix else None
@@ -365,6 +377,109 @@ def _qa_rules(conn: sqlite3.Connection, part: Part, where: str) -> list[Finding]
         for row in rows
         if row["qa_status"] in ("warn", "fail")
     ]
+
+
+# ---------------------------------------------------------------------------
+# Sourcing rules
+# ---------------------------------------------------------------------------
+
+#: Package names that mean surface-mount, which is what JLCPCB assembles.
+_SMD_PATTERNS = (
+    re.compile(r"^\d{4}$"),  # 0402, 0603, 1206 — imperial passive sizes
+    re.compile(r"^(SOT|SOD|SOIC|SSOP|TSSOP|MSOP|QFN|DFN|LQFP|TQFP|QFP|BGA|WLCSP)", re.I),
+    re.compile(r"_SMD$", re.I),
+)
+
+
+def _is_smd(package: str | None) -> bool:
+    return bool(package) and any(p.search(package or "") for p in _SMD_PATTERNS)
+
+
+def _sourcing_rules(
+    conn: sqlite3.Connection,
+    config: Config,
+    part: Part,
+    properties: dict[str, str],
+    where: str,
+) -> list[Finding]:
+    """The P group: is this part actually buyable? (docs/05 §4, docs/07)
+
+    Only ``approved`` parts are checked. A draft with no offers is a part
+    someone is still working on, and saying so on every import would bury the
+    findings that mean something.
+
+    Nothing here touches the network. `klm lint` runs in a pre-commit hook and
+    in CI, and a linter whose result depends on whether the supplier is up is a
+    linter that fails randomly. Staleness is measured against what is stored;
+    the fix is `klm refresh`, which is a separate, explicit act.
+    """
+    if part.status is not PartStatus.APPROVED:
+        return []
+
+    findings: list[Finding] = []
+    offers = list_offers(conn, klm_id=part.klm_id)
+
+    if part.lifecycle in (Lifecycle.OBSOLETE, Lifecycle.NRND):
+        findings.append(Finding("P005", where, f"lifecycle is {part.lifecycle}"))
+
+    if not part.datasheet_url:
+        findings.append(Finding("P006", where, "no datasheet URL"))
+
+    if not offers:
+        findings.append(Finding("P001", where, "no offer at any configured supplier"))
+    else:
+        if all(o.stock == 0 for o in offers):
+            findings.append(
+                Finding("P002", where, f"all {len(offers)} offer(s) show zero stock")
+            )
+
+        oldest = _oldest_age_days(offers)
+        if oldest is not None and oldest > config.stale_days:
+            findings.append(
+                Finding(
+                    "P003",
+                    where,
+                    f"offers are {oldest} days old (threshold {config.stale_days}) "
+                    f"— run: klm refresh --stale {config.stale_days}d",
+                )
+            )
+
+        findings.extend(
+            Finding(
+                "P007",
+                where,
+                f"{o.supplier} offer {o.supplier_pn} is linked at low confidence",
+            )
+            for o in offers
+            if o.match_confidence is Confidence.LOW
+        )
+
+    has_lcsc = any(o.supplier == "lcsc" for o in offers) or bool(
+        properties.get("LCSC", "").strip()
+    )
+    if _is_smd(part.package) and not has_lcsc:
+        findings.append(
+            Finding("P004", where, f"SMD part in {part.package} has no LCSC part number")
+        )
+
+    return findings
+
+
+def _oldest_age_days(offers: Sequence[Offer]) -> int | None:
+    """Age of the least recently refreshed offer, in whole days."""
+    ages = [_age_days(o.fetched_at) for o in offers]
+    known = [age for age in ages if age is not None]
+    return max(known) if known else None
+
+
+def _age_days(stamp: str | None) -> int | None:
+    if not stamp:
+        return None
+    try:
+        fetched = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
+    except ValueError:
+        return None
+    return max(0, (datetime.now(UTC) - fetched).days)
 
 
 def _load(

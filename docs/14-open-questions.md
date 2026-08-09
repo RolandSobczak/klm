@@ -8,45 +8,61 @@ design, not just the implementation.
 
 ---
 
-## Q1 — TME API authentication mechanism
+## Q1 — TME API authentication mechanism — **RESOLVED** (2026-08-09)
 
-**Blocks:** Phase 2
+**Blocked:** Phase 2 · **Answer:** signature-based, as this document suspected. Not OAuth.
 
-The original design note stated TME uses OAuth 2.0. TME's published developer API is, to the best
-of current understanding, **signature-based** — an application key plus a secret used to sign each
-request — which is a materially different implementation.
+The original design note was wrong. TME's scheme is request signing:
 
-**To verify:** current TME developer documentation for the authentication scheme, the exact
-signature algorithm and canonicalization rules, registration requirements, rate limits, and terms
-of use regarding automated access.
+- An application **token** and **secret**, obtained by registering at `developers.tme.eu`. There is
+  no authorization flow, no bearer token, and nothing to refresh.
+- Each request carries an HMAC-SHA1 signature over an OAuth-1.0a-*style* base string —
+  `POST&<percent-encoded endpoint URL>&<percent-encoded sorted query string>` — base64-encoded and
+  sent as the `ApiSignature` parameter. The similarity to OAuth 1.0a's signing is presumably where
+  the "OAuth" claim came from; the resemblance stops at the base string.
+- Parameters are sorted by name and flattened into `Name[0]` / `Name[Key]` form *before* signing,
+  so the flattening is part of the signature, not a transport detail.
+- Tokens come in two kinds: anonymous (public data) and private (linked to a TME customer
+  account). klm needs only the former for sourcing.
+- A bad signature returns `E_INVALID_SIGNATURE` and nothing more diagnostic, which is why
+  `klm.suppliers.tme.signature_base` is a public pure function with its own tests.
 
-**If wrong:** contained. The adapter's auth layer changes; nothing above it does.
+**Still unverified:** the published rate limits, and whether the current v2 API differs from the
+documented scheme above. `developers.tme.eu` puts its reference behind a login, so confirming
+either needs an account. klm's rate limiter defaults conservatively (2 req/s) for that reason, and
+the auth layer is one function deep if v2 turns out to differ.
 
 ---
 
-## Q2 — LCSC API legitimacy and stability ⚠️ highest risk
+## Q2 — LCSC API legitimacy and stability — **RESOLVED** (2026-08-09)
 
-**Blocks:** Phase 2
+**Blocked:** Phase 2 · **Answer:** an official API now exists, and klm's users cannot have it.
 
-LCSC does not publish an official public API for third-party use. The practical options —
-community `jlcsearch`-style services and the EasyEDA component endpoints used by
-`easyeda2kicad`-class tools — are unofficial.
+This was the register's highest-risk item, and the answer went the way the document warned it
+might. The last line of the old text — *"if the answer is bad, manual mode becomes the primary path
+and the effort goes elsewhere"* — is what happened.
 
-**To verify:**
-- Whether an official LCSC or JLCPCB API now exists and what its terms are.
-- Terms of service for whatever endpoint is used, specifically regarding automated access and
-  redistribution of the data.
-- Realistic stability expectations for the unofficial endpoints.
+What was found:
 
-**If wrong:** this is the risk most likely to force a design change. Mitigations already in the
-design:
-- The adapter interface isolates it completely.
-- A **manual mode** (paste an LCSC part number and the visible fields) is first-class, not a
-  fallback afterthought. klm is fully functional without LCSC automation.
-- Caching is aggressive, so an endpoint disappearing degrades gradually rather than instantly.
+- **An official LCSC API exists**, roughly eight services covering search, pricing, stock and
+  ordering.
+- **Access is per company, not per person.** The application requires a company website, a business
+  licence or equivalent, contact details, an estimated order quantity, and a cooperation mode.
+  Applicants who don't qualify are pointed at authorised third-party procurement providers
+  (Luminovo, CalcuQuote).
+- **The terms are restrictive**: no sharing the API documentation with third parties, no
+  aggregating the data into other public or commercial APIs, no providing retrieved material to
+  third parties, no selling derived information, no sharing credentials outside the holder's
+  company.
 
-**Do not build phase 2's LCSC adapter before answering this.** If the answer is bad, manual mode
-becomes the primary path and the effort goes elsewhere.
+klm's user is a hobbyist ordering a few hundred parts a year. They will not be granted access, and
+neither have klm's authors — who therefore cannot legitimately hold the documentation needed to
+write a client on that user's behalf.
+
+**Decision:** [ADR-0009](adr/0009-lcsc-manual-first.md). Manual entry is promoted from fallback to
+primary; `mode = "api"` is a seam for a user who *has* been granted access to plug in their own
+client; and klm ships no code against unofficial endpoints in any mode. The risk is closed rather
+than deferred, because nothing in klm now depends on an endpoint that can disappear.
 
 ---
 
