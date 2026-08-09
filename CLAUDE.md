@@ -20,8 +20,9 @@ footprints, and the sync diff. **Phase 9 is under way**: the TME v2 migration an
 resolution are done, and so is the requirement schema (`klm.research.requirement`, `klm research
 check`), the first four agent tools (`klm.research.tools`, `klm research tools`), and the research
 loop itself (`klm.llm.client`, `klm.research.agent`, `klm research run`), and the datasheet cache
-with cited extraction (`klm.services.datasheets`, `klm datasheet fetch|extract`). Next: the
-proposal queue and review UI, then datasheet Q&A and substitute finding.
+with cited extraction (`klm.services.datasheets`, `klm datasheet fetch|extract`), and the
+proposal queue with its review screen (`klm.services.proposals`, `klm research review`,
+`/api/proposals*`). Next: datasheet Q&A and substitute finding — the last Phase 9 item.
 
 - `README.md` — entry point and documentation map
 - `docs/01`–`docs/15` — the design, one concern per document
@@ -128,6 +129,15 @@ These are the things that will bite an implementer who hasn't read the docs.
 - **Preference scores are relative to the candidate set**, and a preference a candidate is silent
   about is dropped from its average rather than scored zero — scoring it zero punishes a part for
   a field klm never fetched. Ranking a single candidate is meaningless by construction.
+- **"No invented MPNs" is a function, not a prompt line.** `research/tools.py`'s `Ledger` records
+  every part number a tool *returned*; `propose_part` refuses one that is not in it. Same for a
+  parameter's quote: one klm never read in a datasheet is dropped from the proposal and named.
+- **A proposal is not a part, and approving one makes a `draft`.** Separate table, separate
+  lifecycle; the draft still has to pass asset QA and lint. `services/proposals.py`.
+- **A rejection requires a reason, and the reason is stored.** That log is the evidence for what
+  the requirement schema and the prompt are missing — it is worth more than the approvals.
+- **The agent stages a proposal; klm writes it.** Same split as the event log, and it is what lets
+  the read-only connection and a persistent queue coexist.
 - **A datasheet quote comes from the API's citation machinery, never from the model.** The PDF
   goes up as a document block with `citations: {enabled: true}`, so `cited_text` is lifted from
   the file. A model *asked* to quote can paraphrase, and a paraphrase that looks like a quote is

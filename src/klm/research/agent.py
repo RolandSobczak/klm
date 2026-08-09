@@ -44,6 +44,7 @@ from klm.llm.client import LlmError, ModelClient, Usage
 from klm.research.requirement import Requirement
 from klm.research.tools import Toolset
 from klm.services.events import ACTOR_AGENT, record
+from klm.services.proposals import Proposal, ProposalError, save
 
 __all__ = [
     "SYSTEM_PROMPT",
@@ -154,9 +155,13 @@ class Transcript:
 
     answer: str = ""
     steps: list[Step] = field(default_factory=list)
+    proposals: list[Proposal] = field(default_factory=list)
+    """What the session put in the review queue. Persisted as it goes, so a
+    session that hits its ceiling still leaves behind what it had found."""
     usage: Usage = field(default_factory=Usage)
     cost: float = 0.0
     iterations: int = 0
+    requirement: str = ""
     stopped: str = "answered"
     """`answered` | `iteration_cap` | `token_budget` | `spend_ceiling` |
     `refusal` | `max_tokens` | `context_exceeded` | `model_error`."""
@@ -176,7 +181,8 @@ class Transcript:
     def summary(self) -> list[str]:
         lines = [
             f"{self.iterations} turn(s), {len(self.steps)} tool call(s), "
-            f"{self.usage.total} token(s), ~${self.cost:.2f}"
+            f"{len(self.proposals)} proposal(s), {self.usage.total} token(s), "
+            f"~${self.cost:.2f}"
         ]
         if not self.complete:
             lines.append(f"stopped early: {self.stopped}{f' — {self.note}' if self.note else ''}")
@@ -193,6 +199,7 @@ def research(
     conn: sqlite3.Connection | None = None,
     on_text: Callable[[str], None] | None = None,
     on_step: Callable[[Step], None] | None = None,
+    on_proposal: Callable[[Proposal], None] | None = None,
 ) -> Transcript:
     """Run one research session.
 
@@ -202,7 +209,7 @@ def research(
     """
     limits = limits or Limits()
     pricing = pricing or Pricing()
-    transcript = Transcript()
+    transcript = Transcript(requirement=requirement.kind)
 
     definitions = toolset.definitions()
     messages: list[dict[str, Any]] = [{"role": "user", "content": requirement.to_prompt()}]
@@ -289,7 +296,9 @@ def research(
                 {"type": "tool_result", "tool_use_id": call.id, "content": payload}
             )
         messages.append({"role": "user", "content": results})
+        _drain(toolset, transcript, conn, on_proposal)
 
+    _drain(toolset, transcript, conn, on_proposal)
     _log(conn, "research.end", requirement.kind, {
         "stopped": transcript.stopped,
         "note": transcript.note,
@@ -297,8 +306,35 @@ def research(
         "tool_calls": len(transcript.steps),
         "tokens": transcript.usage.total,
         "cost": round(transcript.cost, 4),
+        "proposals": len(transcript.proposals),
     })
     return transcript
+
+
+def _drain(
+    toolset: Toolset,
+    transcript: Transcript,
+    conn: sqlite3.Connection | None,
+    on_proposal: Callable[[Proposal], None] | None,
+) -> None:
+    """Persist what the session proposed, on klm's connection.
+
+    The tool stages a proposal; klm writes it. Same split as the event log,
+    and the same reason: the agent's own connection is read-only, and "the
+    agent proposes, klm records" is easier to keep true when the agent has no
+    way to write at all.
+    """
+    for proposal in toolset.ledger.take():
+        proposal.requirement = proposal.requirement or transcript.requirement
+        if conn is not None:
+            try:
+                save(conn, proposal)
+            except ProposalError as exc:
+                transcript.note = f"{transcript.note} proposal not stored: {exc}".strip()
+                continue
+        transcript.proposals.append(proposal)
+        if on_proposal is not None:
+            on_proposal(proposal)
 
 
 def _over_budget(transcript: Transcript, limits: Limits) -> tuple[str, str] | None:

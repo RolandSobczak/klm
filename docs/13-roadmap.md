@@ -262,7 +262,7 @@ the agent:
 - **Tool definitions with strict schemas** *(done for the four that need nothing later)* —
   `catalog_search`, `supplier_search`, `supplier_get_offer`, `footprint_lookup`, plus `klm
   research tools`. Arguments are validated before a service sees them; the connection is
-  read-only. `propose_part` arrives with the review queue below.
+  read-only.
 - **Research agent** *(done)* — `klm.llm.client` (the model seam), `klm.research.agent`
   (the loop, its limits and its transcript) and `klm research run`. klm drives the loop
   rather than the SDK's tool runner, so every guardrail is tested against a fake model.
@@ -271,7 +271,9 @@ the agent:
   `klm datasheet fetch|extract`. The PDF goes to the API as a document with citations
   enabled, so the quote is lifted from the file rather than written by the model, and an
   uncited value is dropped rather than returned.
-- Proposal queue and review UI
+- **Proposal queue and review UI** *(done)* — `klm.services.proposals`, the `propose_part` tool,
+  `klm research review`, `/api/proposals*` and the Review screen. A proposal is a claim with its
+  evidence; approving runs the phase-3 pipeline and produces a **draft**.
 - **Guardrails, logging, cost metering** *(done with the loop)* — they are the loop's
   structure rather than a layer on top of it: `Limits`, `Pricing`, and `event_log`.
 - Datasheet Q&A; substitute finding

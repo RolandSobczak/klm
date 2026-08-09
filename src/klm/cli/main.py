@@ -19,6 +19,7 @@ import textwrap
 import tomllib
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 from klm import __version__
 from klm.assets.qa import QaReport, QaStatus, check_model3d
@@ -428,6 +429,15 @@ def _add_research_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParse
     run.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"), default="high")
     run.add_argument("--quiet", action="store_true", help="Don't stream the answer as it arrives.")
     run.set_defaults(func=cmd_research_run)
+
+    review = actions.add_parser("review", help="Work the proposal queue.")
+    review.add_argument("proposal", metavar="ID", nargs="?", type=int, help="Show one in full.")
+    review.add_argument("--all", action="store_true", help="Decided ones too.")
+    review.add_argument("--approve", metavar="ID", type=int, help="Create a draft part from it.")
+    review.add_argument("--reject", metavar="ID", type=int)
+    review.add_argument("--reason", metavar="TEXT", help="Required with --reject.")
+    review.add_argument("--format", choices=("text", "json"), default="text")
+    review.set_defaults(func=cmd_research_review)
 
     sheet = sub.add_parser("datasheet", help="Fetch a datasheet, or read parameters out of one.")
     sheet_actions = sheet.add_subparsers(dest="action", metavar="ACTION", required=True)
@@ -3109,6 +3119,106 @@ def cmd_research_run(args: argparse.Namespace) -> int:
         return EXIT_CHECK_FAILED
     print(f"{_INFO} nothing was written to the catalog; this is a proposal")
     return EXIT_OK
+
+
+def cmd_research_review(args: argparse.Namespace) -> int:
+    """The proposal queue: read it, approve into a draft, or reject with why."""
+    from klm.services.proposals import (
+        ProposalError,
+        approve,
+        get,
+        list_proposals,
+        reject,
+    )
+
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        if args.reject is not None:
+            if not (args.reason or "").strip():
+                print(f"{_FAIL} --reject needs --reason; the log is what improves the prompt")
+                return EXIT_CHECK_FAILED
+            proposal = reject(conn, args.reject, args.reason)
+            print(f"{_OK} rejected {proposal.mpn}: {proposal.reason}")
+            return EXIT_OK
+
+        if args.approve is not None:
+            config = load_config(paths.config)
+            proposal, report = approve(
+                conn,
+                AssetStore(paths.assets),
+                args.approve,
+                adapters=build_adapters(config, paths.supplier_cache),
+            )
+            print(f"{_OK} {proposal.mpn} → {report.part.klm_id} ({report.part.status})")
+            for note in report.notes:
+                print(f"  {note}")
+            for kind, why in (report.assets.unavailable if report.assets else []):
+                print(f"{_WARN} no {kind}: {why}")
+            print(f"{_INFO} it is a draft — it still has to pass asset QA and lint")
+            return EXIT_OK
+
+        if args.proposal is not None:
+            found = get(conn, args.proposal)
+            if found is None:
+                print(f"{_FAIL} no proposal {args.proposal}")
+                return EXIT_CHECK_FAILED
+            _show_proposal(found, as_json=args.format == "json")
+            return EXIT_OK
+
+        queue = list_proposals(conn, state=None if args.all else "pending")
+        if args.format == "json":
+            print(json.dumps([_json_proposal(p) for p in queue], indent=2))
+            return EXIT_OK
+        for proposal in queue:
+            mark = {"pending": _INFO, "approved": _OK, "rejected": _FAIL}[proposal.state]
+            print(f"{mark} [{proposal.id}] {proposal.summary()}")
+        if not queue:
+            print(f"{_INFO} nothing waiting for review")
+        return EXIT_OK
+    except ProposalError as exc:
+        print(f"{_FAIL} {exc}")
+        return EXIT_CHECK_FAILED
+    finally:
+        conn.close()
+
+
+def _json_proposal(proposal: Any) -> dict[str, Any]:
+    from dataclasses import asdict
+
+    payload = asdict(proposal)
+    payload["failing"] = [c.name for c in proposal.failing]
+    return dict(payload)
+
+
+def _show_proposal(proposal: Any, *, as_json: bool = False) -> None:
+    if as_json:
+        print(json.dumps(_json_proposal(proposal), indent=2))
+        return
+
+    print(f"[{proposal.id}] {proposal.mpn}  {proposal.manufacturer}  ({proposal.state})")
+    if proposal.description:
+        print(f"  {proposal.description}")
+    if proposal.why:
+        print(f"  why: {proposal.why}")
+    for check in proposal.checks:
+        mark = {"PASS": _OK, "FAIL": _FAIL}.get(check.status, _WARN)
+        print(f"  {mark} {check.name}: needs {check.required}, has {check.actual}")
+    for parameter in proposal.parameters:
+        where = f"p.{parameter.page}" if parameter.page else "no page"
+        print(f"      {parameter.name} = {parameter.value}  [{where}: {parameter.quote!r}]")
+    for offer in proposal.offers:
+        price = f"{offer.unit_price} {offer.currency}" if offer.unit_price else "no price"
+        print(f"  buy: {offer.supplier}:{offer.supplier_pn}  {price}  stock {offer.stock}")
+    for concern in proposal.concerns:
+        print(f"  {_WARN} {concern}")
+    for note in proposal.notes:
+        print(f"  {_INFO} klm: {note}")
+    if proposal.reason:
+        print(f"  rejected: {proposal.reason}")
+    if proposal.klm_id:
+        print(f"  approved as {proposal.klm_id}")
 
 
 def _datasheet_url(args: argparse.Namespace, paths: Paths) -> tuple[str | None, str | None]:

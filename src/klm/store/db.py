@@ -250,11 +250,42 @@ CREATE TABLE reorder_threshold (
 """
 
 
+# Phase 9. The review queue the agent proposes into — deliberately *not* the
+# part table (docs/adr/0006). A proposal is a claim with its evidence attached;
+# a part is something klm is willing to put on a board, and the step between
+# them is a human. `reason` on a rejection is the raw material for improving
+# the requirement schema and the prompt, which is why it is a column rather
+# than a note somebody keeps elsewhere.
+_PROPOSALS = """
+CREATE TABLE proposal (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    at            TEXT NOT NULL,
+    state         TEXT NOT NULL DEFAULT 'pending'
+                  CHECK (state IN ('pending', 'approved', 'rejected')),
+    requirement   TEXT,
+    rank          INTEGER,
+    mpn           TEXT NOT NULL,
+    manufacturer  TEXT NOT NULL,
+    package       TEXT,
+    category      TEXT,
+    description   TEXT,
+    datasheet_url TEXT,
+    why           TEXT,
+    detail        TEXT NOT NULL,     -- JSON: parameters, checks, offers, concerns
+    decided_at    TEXT,
+    reason        TEXT,              -- why it was rejected
+    klm_id        TEXT               -- the draft it became, once approved
+);
+CREATE INDEX proposal_state ON proposal(state);
+"""
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "initial schema", _INITIAL),
     Migration(2, "offer provenance columns", _OFFER_PROVENANCE),
     Migration(3, "per-part rotation corrections", _PART_ROTATION),
     Migration(4, "ordering: pins, thresholds, line provenance", _ORDERING),
+    Migration(5, "the agent's review queue", _PROPOSALS),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1].version

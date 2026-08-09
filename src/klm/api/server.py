@@ -37,6 +37,10 @@ from klm.services.generate import generate
 from klm.services.lint import Selector, lint_catalog
 from klm.services.orders import get_order, list_orders, pins, receive
 from klm.services.preview import PreviewError, render_part
+from klm.services.proposals import ProposalError, list_proposals
+from klm.services.proposals import approve as approve_proposal
+from klm.services.proposals import get as get_proposal
+from klm.services.proposals import reject as reject_proposal
 from klm.services.split import split_order
 from klm.services.stock import list_stock, where
 from klm.services.sync import diff_part, sync_status
@@ -533,6 +537,57 @@ def create_app(catalog: str | Path | None = None) -> Any:
             ]
         finally:
             conn.close()
+
+    # -- the agent's review queue --------------------------------------
+
+    @app.get("/api/proposals")
+    def proposal_queue(state: str | None = "pending") -> list[dict[str, Any]]:
+        conn = db()
+        try:
+            return [dict(_json(p)) for p in list_proposals(conn, state=state or None)]
+        finally:
+            conn.close()
+
+    @app.get("/api/proposals/{proposal_id}")
+    def proposal(proposal_id: int) -> dict[str, Any]:
+        conn = db()
+        try:
+            found = get_proposal(conn, proposal_id)
+            if found is None:
+                raise HTTPException(404, f"no proposal {proposal_id}")
+            return dict(_json(found))
+        finally:
+            conn.close()
+
+    @app.post("/api/proposals/{proposal_id}/reject")
+    def proposal_reject(proposal_id: int, body: dict[str, Any]) -> dict[str, Any]:
+        conn = db()
+        try:
+            reason = str(body.get("reason", "")).strip()
+            try:
+                return dict(_json(reject_proposal(conn, proposal_id, reason)))
+            except ProposalError as exc:
+                raise HTTPException(400, str(exc)) from exc
+        finally:
+            conn.close()
+
+    @app.post("/api/proposals/{proposal_id}/approve")
+    def proposal_approve(proposal_id: int) -> dict[str, Any]:
+        # A job: approving runs the phase-3 asset pipeline, which shells out to
+        # KiCad's libraries and can take tens of seconds.
+        def work(report):  # type: ignore[no-untyped-def]
+            conn = db()
+            try:
+                report(f"approving proposal {proposal_id}")
+                proposal, result = approve_proposal(conn, AssetStore(paths.assets), proposal_id)
+                report(f"{proposal.mpn} → {result.part.klm_id} ({result.part.status})")
+                for note in result.notes:
+                    report(note)
+                return {"klm_id": result.part.klm_id, "status": str(result.part.status)}
+            finally:
+                conn.close()
+
+        return jobs.start(f"approve {proposal_id}", work).to_json()
 
     # -- generation ----------------------------------------------------
 
