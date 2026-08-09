@@ -1087,3 +1087,148 @@ def test_output_survives_a_windows_code_page(
     assert code in (EXIT_OK, EXIT_CHECK_FAILED), "a code page must not become an error"
     assert "catalog home" in written
     assert "charmap" not in written, "the encoding must not leak into the output"
+
+
+REQUIREMENT = """\
+kind = "buck_converter"
+
+[constraints]
+vin = { min = 4.5, max = 18, unit = "V" }
+iout = ">=1A"
+
+[[preferences]]
+kind = "minimize"
+what = "unit_price"
+"""
+
+
+def test_research_check_reads_a_requirement(tmp_path: Path, capsys) -> None:
+    path = tmp_path / "req.toml"
+    path.write_text(REQUIREMENT, encoding="utf-8")
+
+    assert main(["research", "check", str(path)]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "vin: 4.5V..18V" in out
+    assert "minimize unit_price" in out
+
+
+def test_research_check_needs_no_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A requirement is checkable on a machine that has nothing set up."""
+    monkeypatch.setenv("KLM_HOME", str(tmp_path / "nowhere"))
+    path = tmp_path / "req.toml"
+    path.write_text(REQUIREMENT, encoding="utf-8")
+    assert main(["research", "check", str(path)]) == EXIT_OK
+
+
+def test_research_check_reports_every_problem_and_fails(tmp_path: Path, capsys) -> None:
+    path = tmp_path / "req.toml"
+    path.write_text('[constrains]\nvin = ">=5V"\n', encoding="utf-8")
+
+    assert main(["research", "check", str(path)]) == EXIT_CHECK_FAILED
+
+    out = capsys.readouterr().out
+    assert "unknown section 'constrains'" in out
+    assert "'kind' is required" in out
+
+
+def test_research_check_writes_back_what_klm_understood(tmp_path: Path, capsys) -> None:
+    path = tmp_path / "req.toml"
+    path.write_text(REQUIREMENT, encoding="utf-8")
+
+    assert main(["research", "check", str(path), "--toml"]) == EXIT_OK
+
+    written = capsys.readouterr().out
+    assert 'iout = { min = 1.0, unit = "A" }' in written, "the shorthand is shown resolved"
+
+
+def test_research_tools_lists_what_the_agent_could_do(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    monkeypatch.setenv("TME_API_KEY", "key")
+    monkeypatch.setenv("TME_API_SECRET", "secret")
+
+    assert main(["research", "tools"]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "catalog_search" in out and "supplier_search" in out
+    assert "no tool writes to the catalog" in out
+    assert "lcsc: manual mode" in out, "an absent tool says why it is absent"
+
+
+def test_research_tools_without_credentials_offers_no_supplier(home: Path, capsys) -> None:
+    """Learning this from a session that returned nothing useful is expensive."""
+    assert main(["init"]) == EXIT_OK
+
+    assert main(["research", "tools"]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "supplier_search" not in out
+    assert "tme: no credentials" in out
+
+
+def test_research_run_needs_the_agent_extra(home: Path, tmp_path: Path, capsys) -> None:
+    """No SDK is a thing to report, not a traceback."""
+    assert main(["init"]) == EXIT_OK
+    path = tmp_path / "req.toml"
+    path.write_text(REQUIREMENT, encoding="utf-8")
+
+    assert main(["research", "run", str(path)]) == EXIT_CHECK_FAILED
+
+    out = capsys.readouterr().out
+    assert "klm[agent]" in out
+
+
+def test_research_run_checks_the_requirement_before_spending_anything(
+    home: Path, tmp_path: Path, capsys
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    path = tmp_path / "req.toml"
+    path.write_text('[constrains]\nvin = ">=5V"\n', encoding="utf-8")
+
+    assert main(["research", "run", str(path)]) == EXIT_CHECK_FAILED
+
+    out = capsys.readouterr().out
+    assert "unknown section 'constrains'" in out
+    assert "klm[agent]" not in out, "the file is read before a model is built"
+
+
+def test_datasheet_fetch_caches_a_pdf(home: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    import klm.services.datasheets as datasheets
+
+    assert main(["init"]) == EXIT_OK
+    monkeypatch.setattr(datasheets, "urllib_bytes", lambda url, timeout: b"%PDF-1.7\nx\n%%EOF")
+
+    assert main(["datasheet", "fetch", "https://example.test/a.pdf"]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "sha256:" in out
+
+
+def test_datasheet_fetch_reports_a_page_that_is_not_a_pdf(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    import klm.services.datasheets as datasheets
+
+    assert main(["init"]) == EXIT_OK
+    monkeypatch.setattr(datasheets, "urllib_bytes", lambda url, timeout: b"<html>login</html>")
+
+    assert main(["datasheet", "fetch", "https://example.test/a.pdf"]) == EXIT_CHECK_FAILED
+    assert "not a PDF" in capsys.readouterr().out
+
+
+def test_datasheet_extract_needs_a_part_with_a_datasheet(home: Path, capsys) -> None:
+    """A part with no datasheet URL is an answer, not a klm error."""
+    assert main(["init"]) == EXIT_OK
+    paths = Paths.resolve(None)
+    conn = connect(paths.db, create=False)
+    try:
+        seed_resistor(AssetStore(paths.assets), conn, datasheet_url=None)
+    finally:
+        conn.close()
+
+    code = main(["datasheet", "extract", "RC0402FR-074K7L", "--parameter", "Vin max"])
+
+    assert code == EXIT_CHECK_FAILED
+    assert "no datasheet URL" in capsys.readouterr().out

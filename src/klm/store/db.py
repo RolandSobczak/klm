@@ -260,16 +260,33 @@ MIGRATIONS: list[Migration] = [
 SCHEMA_VERSION = MIGRATIONS[-1].version
 
 
-def connect(path: str | Path, *, create: bool = True) -> sqlite3.Connection:
+def connect(
+    path: str | Path, *, create: bool = True, read_only: bool = False
+) -> sqlite3.Connection:
     """Open the catalog database with klm's standard pragmas.
 
     WAL so a long read (the desktop app listing parts) does not block a write,
     and a busy timeout because the GUI, a CLI invocation and a background
     refresh can all be live at once (docs/03 §9).
+
+    ``read_only`` opens it through SQLite's `mode=ro`, which makes a write
+    fail in the database rather than in a code review. The research agent's
+    tools use it: "the agent cannot write to the catalog" is meant to be an
+    architectural guarantee (docs/adr/0006), and a guarantee that depends on
+    every future tool author remembering it is a convention.
     """
     path = Path(path)
     if not create and not path.exists():
         raise FileNotFoundError(f"no catalog database at {path}")
+
+    if read_only:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, isolation_level=None)
+        conn.row_factory = sqlite3.Row
+        # Not `journal_mode` — setting it writes to the database header, which
+        # is precisely what this connection may not do.
+        conn.execute("PRAGMA busy_timeout = 5000")
+        return conn
+
     path.parent.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(path, isolation_level=None)

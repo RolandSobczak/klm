@@ -15,6 +15,7 @@ import json
 import os
 import sqlite3
 import sys
+import textwrap
 import tomllib
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -97,6 +98,7 @@ from klm.services.vendor import VendorError, VendorPlan, plan_vendor, unvendor, 
 from klm.services.verify import to_json, verify_clean_room
 from klm.store import AssetKind, AssetStore, Paths, connect, migrate
 from klm.store.db import SCHEMA_VERSION, user_version
+from klm.suppliers.base import SupplierAdapter
 from klm.suppliers.lcsc import is_lcsc_pn, product_url
 from klm.suppliers.registry import build_adapters
 
@@ -297,6 +299,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_fab_parsers(sub)
     _add_repo_parsers(sub)
     _add_ordering_parsers(sub)
+    _add_research_parsers(sub)
 
     app = sub.add_parser("app", help="Open klm in a desktop window.")
     app.add_argument("--port", type=int, help="Localhost port (default: a free one).")
@@ -398,6 +401,52 @@ def _add_ordering_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParse
     scanning = label_actions.add_parser("scan", help="Resolve a short ID from a drawer.")
     scanning.add_argument("short")
     scanning.set_defaults(func=cmd_labels_scan)
+
+
+def _add_research_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    research = sub.add_parser("research", help="Find a part that meets a stated requirement.")
+    actions = research.add_subparsers(dest="action", metavar="ACTION", required=True)
+
+    check = actions.add_parser("check", help="Read a requirement file and say what it means.")
+    check.add_argument("file", metavar="FILE")
+    check.add_argument(
+        "--toml",
+        action="store_true",
+        help="Print the requirement back, normalised — what klm actually understood.",
+    )
+    check.set_defaults(func=cmd_research_check)
+
+    tools = actions.add_parser("tools", help="What the agent can do on this machine.")
+    tools.add_argument("--format", choices=("text", "json"), default="text")
+    tools.set_defaults(func=cmd_research_tools)
+
+    run = actions.add_parser("run", help="Research a requirement. Costs money; proposes only.")
+    run.add_argument("file", metavar="FILE", help="A requirement file (klm research check).")
+    run.add_argument("--max-spend", type=float, default=2.0, metavar="USD")
+    run.add_argument("--max-iterations", type=int, default=20)
+    run.add_argument("--max-tokens", type=int, default=400_000, help="Across the whole session.")
+    run.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"), default="high")
+    run.add_argument("--quiet", action="store_true", help="Don't stream the answer as it arrives.")
+    run.set_defaults(func=cmd_research_run)
+
+    sheet = sub.add_parser("datasheet", help="Fetch a datasheet, or read parameters out of one.")
+    sheet_actions = sheet.add_subparsers(dest="action", metavar="ACTION", required=True)
+
+    getting = sheet_actions.add_parser("fetch", help="Download and cache a datasheet PDF.")
+    getting.add_argument("target", metavar="URL_OR_PART")
+    getting.add_argument("--refresh", action="store_true", help="Ignore the cached copy.")
+    getting.set_defaults(func=cmd_datasheet_fetch)
+
+    reading = sheet_actions.add_parser(
+        "extract", help="Read parameters out of a datasheet, with the page and the quote."
+    )
+    reading.add_argument("target", metavar="URL_OR_PART")
+    reading.add_argument(
+        "--parameter", metavar="NAME", action="append", default=[], required=True,
+        help="Repeatable. Ask in your own words: --parameter 'Vin max'.",
+    )
+    reading.add_argument("--format", choices=("text", "json"), default="text")
+    reading.set_defaults(func=cmd_datasheet_extract)
 
 
 def _add_repo_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -2890,6 +2939,275 @@ def cmd_labels_scan(args: argparse.Namespace) -> int:
     finally:
         conn.close()
     return EXIT_OK if len(matches) == 1 else EXIT_CHECK_FAILED
+
+
+# ---------------------------------------------------------------------------
+# research
+# ---------------------------------------------------------------------------
+
+
+def cmd_research_check(args: argparse.Namespace) -> int:
+    """Read a requirement and say back what klm understood by it.
+
+    Needs no catalog and no API key. The point is to make the hard/soft split
+    visible before a research session spends money on it: a constraint that
+    silently became a preference, or a section a typo dropped, is far cheaper
+    to see here than in a list of candidates that all look plausible.
+    """
+    from klm.research.requirement import RequirementError, load_requirement
+
+    try:
+        requirement = load_requirement(Path(args.file))
+    except RequirementError as exc:
+        for problem in exc.problems:
+            print(f"{_FAIL} {problem}")
+        return EXIT_CHECK_FAILED
+
+    if args.toml:
+        print(requirement.to_toml(), end="")
+        return EXIT_OK
+
+    print(f"{_OK} {args.file} reads as a requirement")
+    print()
+    print(requirement.to_prompt())
+    return EXIT_OK
+
+
+def cmd_research_tools(args: argparse.Namespace) -> int:
+    """List the tools a research session would have here, and why not others.
+
+    Worth being able to ask before spending anything: with no TME credentials
+    the agent has no `supplier_search`, and finding that out from a session
+    that returned nothing useful is an expensive way to learn it.
+    """
+    from klm.research.tools import ResearchContext, build_toolset
+
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    config = load_config(paths.config)
+
+    # Credentials are resolved from the environment at the point of use, so an
+    # adapter exists whether or not there is a key behind it. A tool that
+    # cannot authenticate is worse than an absent one — the agent spends a turn
+    # discovering it — so the ones without credentials are left out and named.
+    built = build_adapters(config, paths.supplier_cache)
+    adapters: dict[str, SupplierAdapter] = {}
+    absent: list[str] = []
+    for name, adapter in built.items():
+        supplier = config.suppliers[name]
+        if supplier.mode != "api":
+            # LCSC in manual mode answers every lookup with "I don't know", by
+            # design (ADR-0009). Offering that as a tool costs a turn to learn.
+            absent.append(
+                f"{name}: manual mode — its offers are entered by a human, so it has no tools"
+            )
+        elif not supplier.has_credentials():
+            absent.append(f"{name}: no credentials in the environment, so its tools are absent")
+        else:
+            adapters[name] = adapter
+
+    conn = connect(paths.db, create=False, read_only=True)
+    try:
+        toolset = build_toolset(
+            ResearchContext(conn=conn, store=AssetStore(paths.assets), adapters=adapters)
+        )
+        if args.format == "json":
+            print(json.dumps(toolset.definitions(), indent=2))
+            return EXIT_OK
+
+        for tool in toolset.tools:
+            print(f"{_OK} {tool.name}")
+            print(f"    {textwrap.shorten(tool.description, width=88)}")
+        for reason in absent:
+            print(f"{_WARN} {reason}")
+        print(f"{_INFO} no tool writes to the catalog; proposals go to a review queue")
+    finally:
+        conn.close()
+    return EXIT_OK
+
+
+def cmd_research_run(args: argparse.Namespace) -> int:
+    """Research one requirement, and say what it cost.
+
+    Two connections, deliberately: the tools get a read-only one, and the
+    event log gets a writable one. klm records what the agent did; the agent
+    cannot record anything (docs/adr/0006).
+    """
+    from klm.llm.client import EXTRACTION_MODEL, AnthropicClient, LlmUnavailable
+    from klm.research.agent import Limits, Step, research
+    from klm.research.requirement import RequirementError, load_requirement
+    from klm.research.tools import ResearchContext, build_toolset
+
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+
+    try:
+        requirement = load_requirement(Path(args.file))
+    except RequirementError as exc:
+        for problem in exc.problems:
+            print(f"{_FAIL} {problem}")
+        return EXIT_CHECK_FAILED
+
+    config = load_config(paths.config)
+    adapters = {
+        name: adapter
+        for name, adapter in build_adapters(config, paths.supplier_cache).items()
+        if config.suppliers[name].mode == "api" and config.suppliers[name].has_credentials()
+    }
+
+    try:
+        client = AnthropicClient(effort=args.effort)
+    except LlmUnavailable as exc:
+        print(f"{_FAIL} {exc}")
+        return EXIT_CHECK_FAILED
+
+    reading = connect(paths.db, create=False, read_only=True)
+    writing = connect(paths.db, create=False)
+    try:
+        toolset = build_toolset(
+            ResearchContext(
+                conn=reading,
+                store=AssetStore(paths.assets),
+                adapters=adapters,
+                datasheet_cache=paths.datasheet_cache,
+                # A small model for reading PDFs: narrow, mechanical, and done
+                # a lot. Its spend counts against the same session ceiling.
+                reader=AnthropicClient(model=EXTRACTION_MODEL, max_tokens=4000),
+            )
+        )
+        print(f"{_INFO} {requirement.kind}: {len(toolset.tools)} tool(s), "
+              f"ceiling ${args.max_spend:.2f}")
+
+        def show(step: Step) -> None:
+            detail = ", ".join(f"{k}={v!r}" for k, v in step.arguments.items())
+            print(f"  {step.name}({detail})")
+
+        transcript = research(
+            requirement,
+            toolset,
+            client,
+            limits=Limits(
+                max_iterations=args.max_iterations,
+                max_tokens=args.max_tokens,
+                max_spend=args.max_spend,
+            ),
+            conn=writing,
+            on_text=None if args.quiet else lambda text: print(text, end="", flush=True),
+            on_step=show,
+        )
+    finally:
+        reading.close()
+        writing.close()
+
+    print()
+    if args.quiet and transcript.answer:
+        print(transcript.answer)
+    for line in transcript.summary():
+        print(f"{_INFO} {line}")
+    if not transcript.complete:
+        print(f"{_WARN} this answer is partial — {transcript.stopped}")
+        return EXIT_CHECK_FAILED
+    print(f"{_INFO} nothing was written to the catalog; this is a proposal")
+    return EXIT_OK
+
+
+def _datasheet_url(args: argparse.Namespace, paths: Paths) -> tuple[str | None, str | None]:
+    """`(url, title)` for a URL, or for a part that carries one.
+
+    A part with no datasheet URL is a checked condition, not a klm error —
+    the answer is "this part has none", which the caller reports and exits 1.
+    """
+    target = args.target
+    if target.lower().startswith(("http://", "https://")):
+        return target, None
+    conn = connect(paths.db, create=False)
+    try:
+        part = _resolve_part(conn, target)
+        if not part.datasheet_url:
+            print(f"{_FAIL} {part.mpn} has no datasheet URL — set one, or pass a URL")
+            return None, None
+        return part.datasheet_url, part.mpn
+    finally:
+        conn.close()
+
+
+def cmd_datasheet_fetch(args: argparse.Namespace) -> int:
+    from klm.services.datasheets import DatasheetError, fetch
+
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    url, _ = _datasheet_url(args, paths)
+    if url is None:
+        return EXIT_CHECK_FAILED
+
+    try:
+        datasheet = fetch(url, paths.datasheet_cache, refresh=args.refresh)
+    except DatasheetError as exc:
+        print(f"{_FAIL} {exc}")
+        return EXIT_CHECK_FAILED
+
+    print(f"{_OK} {datasheet.sha}  {datasheet.size / 1000:.0f} kB")
+    print(f"      {datasheet.path}")
+    return EXIT_OK
+
+
+def cmd_datasheet_extract(args: argparse.Namespace) -> int:
+    """Read parameters out of a datasheet — with the page and the quote.
+
+    The same code path the agent's `datasheet_extract` tool uses, so a human
+    can check what the agent would be told before trusting a proposal built on
+    it. A parameter the datasheet does not actually state is *reported as
+    dropped*, never returned as a value.
+    """
+    from klm.llm.client import EXTRACTION_MODEL, AnthropicClient, LlmUnavailable
+    from klm.services.datasheets import DatasheetError, extract, fetch
+
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    url, title = _datasheet_url(args, paths)
+    if url is None:
+        return EXIT_CHECK_FAILED
+
+    try:
+        client = AnthropicClient(model=EXTRACTION_MODEL, max_tokens=4000)
+    except LlmUnavailable as exc:
+        print(f"{_FAIL} {exc}")
+        return EXIT_CHECK_FAILED
+
+    try:
+        datasheet = fetch(url, paths.datasheet_cache)
+    except DatasheetError as exc:
+        print(f"{_FAIL} {exc}")
+        return EXIT_CHECK_FAILED
+
+    result = extract(datasheet, args.parameter, client, title=title)
+
+    if args.format == "json":
+        print(json.dumps({
+            "datasheet": datasheet.sha,
+            "parameters": [
+                {
+                    "name": p.name,
+                    "value": p.value,
+                    "page": p.page,
+                    "quote": p.citations[0].quote,
+                }
+                for p in result.parameters
+            ],
+            "dropped_uncited": [{"name": n, "value": v} for n, v in result.uncited],
+            "not_stated": result.missing,
+        }, indent=2))
+        return EXIT_OK if result.parameters else EXIT_CHECK_FAILED
+
+    for parameter in result.parameters:
+        print(f"{_OK} {parameter}")
+    for name, value in result.uncited:
+        print(f"{_WARN} {name} = {value} — nothing cited for it, dropped")
+    for name in result.missing:
+        print(f"{_INFO} {name}: the datasheet does not state it")
+    if result.note:
+        print(f"{_WARN} {result.note}")
+    return EXIT_OK if result.parameters else EXIT_CHECK_FAILED
 
 
 # ---------------------------------------------------------------------------

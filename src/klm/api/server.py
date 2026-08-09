@@ -31,7 +31,7 @@ from klm.config import load_config
 from klm.kicad.project import ProjectError, find_project
 from klm.model import PartStatus
 from klm.services.bom import extract_bom
-from klm.services.catalog import count_parts, get_part, list_parts, save_part
+from klm.services.catalog import count_parts, get_part, save_part, search_parts
 from klm.services.demand import parse_build_plan, plan_demand
 from klm.services.generate import generate
 from klm.services.lint import Selector, lint_catalog
@@ -147,16 +147,7 @@ def create_app(catalog: str | Path | None = None) -> Any:
     def parts(status: str | None = None, q: str | None = None) -> list[dict[str, Any]]:
         conn = db()
         try:
-            found = list_parts(conn, status=PartStatus(status) if status else None)
-            if q:
-                needle = q.lower()
-                found = [
-                    p
-                    for p in found
-                    if needle in p.mpn.lower()
-                    or needle in p.manufacturer.lower()
-                    or needle in (p.description or "").lower()
-                ]
+            found = search_parts(conn, q, status=PartStatus(status) if status else None)
             return [dict(_json(p)) for p in found]
         finally:
             conn.close()

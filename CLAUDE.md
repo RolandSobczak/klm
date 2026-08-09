@@ -16,7 +16,12 @@ correction table and `klm fab feedback`), and repository scaffolding and CI (`kl
 inventory (`klm order plan|export|mark-placed|receive|pin`, `klm stock *`, `klm labels *`). **Q1, Q2, Q3, Q10 and Q11 are resolved; Q4 was checked and is
 still open, but no longer blocks anything shipped.** **Q8 is resolved too.** Phase 8 (the desktop
 app) is complete: the API, the job model, eight screens, an SVG renderer for symbols and
-footprints, and the sync diff. Phase 9 (the AI research agent) is next.
+footprints, and the sync diff. **Phase 9 is under way**: the TME v2 migration and constraint→ID
+resolution are done, and so is the requirement schema (`klm.research.requirement`, `klm research
+check`), the first four agent tools (`klm.research.tools`, `klm research tools`), and the research
+loop itself (`klm.llm.client`, `klm.research.agent`, `klm research run`), and the datasheet cache
+with cited extraction (`klm.services.datasheets`, `klm datasheet fetch|extract`). Next: the
+proposal queue and review UI, then datasheet Q&A and substitute finding.
 
 - `README.md` — entry point and documentation map
 - `docs/01`–`docs/15` — the design, one concern per document
@@ -108,9 +113,58 @@ These are the things that will bite an implementer who hasn't read the docs.
   fifty 0402 resistors from creating fifty footprints.
 - **`cad/scripts/obj2step.py` is not on klm's import path on purpose.** It runs under FreeCAD's
   interpreter; putting it under `src/klm` would invite someone to import it.
+- **A requirement's hard constraints and its preferences are different types**, not two lists with
+  a convention. A preference can only reorder what already qualified, so a near miss is reported
+  rather than dropped — which is what makes "nothing meets your constraints; the closest is X"
+  possible. `prefer` inside a `[constraints]` entry is refused, not accommodated.
+- **A constraint checked against a value the candidate never stated is `unknown`, never `pass`** —
+  the QA gate's rule, in the research layer. A value klm cannot read is also `unknown`, not
+  `fail`: "see datasheet" in a supplier column must not reject the right part.
+- **Ranges are compared by coverage, not overlap.** A part rated 1.8–6.5 V does not run a
+  4.5–18 V rail, and the two overlap. `NumericConstraint._covered_by` is where this lives.
+- **In a requirement, a bare string is a text constraint** unless it carries a comparison operator
+  or a range. Deciding by "does it happen to parse as a number" would read `package = "0402"` as
+  402 and filter an axis nobody asked about.
+- **Preference scores are relative to the candidate set**, and a preference a candidate is silent
+  about is dropped from its average rather than scored zero — scoring it zero punishes a part for
+  a field klm never fetched. Ranking a single candidate is meaningless by construction.
+- **A datasheet quote comes from the API's citation machinery, never from the model.** The PDF
+  goes up as a document block with `citations: {enabled: true}`, so `cited_text` is lifted from
+  the file. A model *asked* to quote can paraphrase, and a paraphrase that looks like a quote is
+  indistinguishable from provenance — which would make the whole guardrail decorative. A value
+  stated in an uncited block is dropped and reported, never returned.
+- **klm does not parse PDFs.** It caches the bytes and lets the API read them. A hand-rolled
+  extractor would work on the simple half of datasheets and produce nonsense on the other half.
+  A URL that comes back as HTML (a login page, a redirect) is reported, not sent as a "document".
+- **klm drives the agent loop; the SDK's tool runner is deliberately not used.** The guardrails
+  (iteration cap, token budget, spend ceiling, `event_log`) *are* this phase, the tool set is data
+  built per machine rather than decorated functions, and the loop has to be testable against a fake
+  model — a guardrail only exercisable by spending money is one nobody exercises. `klm.llm.client`
+  is the seam; `research/agent.py` is the loop.
+- **A session that stopped early says so, and exits non-zero.** An answer cut off by the iteration
+  cap or the spend ceiling that reads as finished is the worst output the agent can produce.
+- **Limits are checked before each request, not after.** A limit that trips only once exceeded is
+  a limit that is always exceeded.
+- **The event log is written on klm's connection, not the agent's.** The tools hold a read-only
+  one. klm records what the agent did; the agent cannot record anything — that split is what lets
+  the audit trail and the no-write guarantee coexist.
+- **`stop_reason` is checked before the reply is read.** A refusal carries no usable content; the
+  check is the difference between a clear message and an `IndexError`.
 - **The AI agent has no tool that writes to the catalog.** Architectural, not a prompt
   instruction. It proposes into a review queue; a human approves; the result is still only a
-  `draft` that must pass asset QA and lint. See `docs/adr/0006`.
+  `draft` that must pass asset QA and lint. See `docs/adr/0006`. Enforced twice: no such function
+  exists in `klm.research.tools`, and the connection those tools hold is opened `mode=ro`
+  (`connect(..., read_only=True)`), so a write fails in SQLite rather than in a code review.
+- **Tool arguments are validated against the same schema the model was given**, in
+  `research/tools.py`, before a service sees them. `strict` is a promise from the other end of a
+  network connection.
+- **A tool returns an error, it does not raise one.** A supplier outage, an unknown category, an
+  unrecognised package are all results the agent can act on; an exception ends the session. Only a
+  genuine defect in klm propagates — a bug a research session absorbs is a bug nobody ever sees.
+- **An ambiguous category is refused with its candidates.** Taking the first match searches a
+  category the requirement never mentioned and returns a confident list of parts from it.
+- **`footprint_availability` mirrors `_acquire_footprint`'s branch order exactly** (catalog →
+  KiCad → generate → none). If the two drift, the agent recommends reuse that never happens.
 - **Generated output must be byte-stable.** Vendor twice with no changes → `git diff --exit-code`
   passes. Fixed float precision, sorted fields, no incidental timestamps.
 - **The global library and a vendored one are built by one function.** `services/library.py`
