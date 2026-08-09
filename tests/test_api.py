@@ -175,7 +175,16 @@ def test_order_planning_returns_lines_carts_and_the_reasoning(client, tmp_path: 
     ).json()
     assert payload["lines"][0]["supplier"] == "tme"
     assert payload["lines"][0]["explain"], "the UI shows why, so the API has to carry it"
-    assert payload["carts"]["tme"]["assumptions"], "every estimate names its assumptions"
+
+    cart = payload["carts"]["tme"]
+    assert cart["assumptions"], "every estimate names its assumptions"
+    # `total` is a *property* of CartCost, and `asdict` does not see properties.
+    # Without it the ordering screen reads `undefined` and renders nothing at
+    # all — which is how it shipped until a screenshot caught it.
+    assert cart["total"] == pytest.approx(
+        cart["subtotal"] + cart["shipping"] + cart["duty"] + cart["vat"]
+    )
+    assert payload["total"] == pytest.approx(cart["total"])
 
 
 def test_a_malformed_build_plan_is_a_400(client) -> None:

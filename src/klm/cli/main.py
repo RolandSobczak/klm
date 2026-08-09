@@ -72,6 +72,7 @@ from klm.services.register import apply_plan, plan_registration
 from klm.services.scaffold import KICAD_IMAGE, apply_scaffold, plan_scaffold
 from klm.services.split import Assignment, split_order
 from klm.services.stock import (
+    StockItem,
     adjust,
     consume,
     list_stock,
@@ -1295,6 +1296,21 @@ def _add_part_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -
     )
     add.set_defaults(func=cmd_part_add)
 
+    # The GUI could approve and deprecate and the CLI could not, which by this
+    # project's own rule is a bug in the CLI rather than a feature of the GUI.
+    approve = actions.add_parser("approve", help="Mark a part usable in a design.")
+    approve.add_argument("part", metavar="ID_OR_MPN")
+    approve.set_defaults(func=cmd_part_approve, status=PartStatus.APPROVED)
+
+    deprecate = actions.add_parser("deprecate", help="Retire a part without deleting it.")
+    deprecate.add_argument("part", metavar="ID_OR_MPN")
+    deprecate.set_defaults(func=cmd_part_approve, status=PartStatus.DEPRECATED)
+
+    show = actions.add_parser("show", help="Print one part, its offers and its stock.")
+    show.add_argument("part", metavar="ID_OR_MPN")
+    show.add_argument("--format", choices=("text", "json"), default="text")
+    show.set_defaults(func=cmd_part_show)
+
 
 def _add_assets_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     assets = sub.add_parser("assets", help="Acquire, check and convert a part's files.")
@@ -1404,6 +1420,100 @@ def cmd_part_add(args: argparse.Namespace) -> int:
     print()
     print("Next: klm lint --select S,V,A --fix --dry-run, then approve it")
     return EXIT_OK if report.ok else EXIT_CHECK_FAILED
+
+
+def cmd_part_approve(args: argparse.Namespace) -> int:
+    """`klm part approve` / `klm part deprecate` — the status write.
+
+    Deliberately does not check lint first. Approval is a human's judgement and
+    a linter's opinion is advice; making the command refuse would mean the only
+    way to approve a part klm mis-reads is to edit the database by hand.
+    """
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        part = _resolve_part(conn, args.part)
+        if part.status is args.status:
+            print(f"{_INFO} {part.mpn} is already {args.status}")
+            return EXIT_OK
+        was, part.status = part.status, args.status
+        part.updated_at = None
+        save_part(conn, part)
+    finally:
+        conn.close()
+
+    print(f"{_OK} {part.mpn}  {was} → {args.status}")
+    if args.status is PartStatus.DEPRECATED and part.symbol_hash is not None:
+        # S005: a deprecated part is not generated, so anything still using it
+        # keeps working from its vendored copy and nothing new can pick it up.
+        print(f"  {_INFO} it will stop being generated; `klm generate` to apply")
+    return EXIT_OK
+
+
+def cmd_part_show(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        part = _resolve_part(conn, args.part)
+        offers = list_offers(conn, klm_id=part.klm_id)
+        locations = where(conn, part.klm_id)
+    finally:
+        conn.close()
+
+    if args.format == "json":
+        print(json.dumps(_part_payload(part, offers, locations), indent=2))
+        return EXIT_OK
+
+    print(f"{part.mpn}  ({part.manufacturer or 'manufacturer unknown'})")
+    print(f"  {part.description or 'no description'}")
+    for label, value in (
+        ("klm_id", part.klm_id),
+        ("category", part.category or "—"),
+        ("package", part.package or "—"),
+        ("status", str(part.status)),
+        ("lifecycle", str(part.lifecycle)),
+        ("datasheet", part.datasheet_url or "—"),
+    ):
+        print(f"  {label:<12} {value}")
+
+    print(f"\n  offers ({len(offers)})")
+    for offer in offers:
+        stock = "stock unknown" if offer.stock is None else f"{offer.stock} in stock"
+        print(f"    {offer.supplier:<6} {offer.supplier_pn:<18} {stock}")
+    if not offers:
+        print("    none — `klm refresh` fetches them")
+
+    print(f"\n  stock ({sum(item.quantity for item in locations)})")
+    for item in locations:
+        print(f"    {item.quantity:>7}  {item.location}")
+    if not locations:
+        print("    not recorded anywhere")
+    return EXIT_OK
+
+
+def _part_payload(part: Part, offers: list[Offer], locations: list[StockItem]) -> dict[str, object]:
+    """The JSON shape of `klm part show`, matching the API's part payload."""
+    return {
+        "klm_id": part.klm_id,
+        "mpn": part.mpn,
+        "manufacturer": part.manufacturer,
+        "description": part.description,
+        "category": part.category,
+        "package": part.package,
+        "status": str(part.status),
+        "lifecycle": str(part.lifecycle),
+        "datasheet_url": part.datasheet_url,
+        "symbol_hash": part.symbol_hash,
+        "footprint_hash": part.footprint_hash,
+        "model3d_hash": part.model3d_hash,
+        "offers": [
+            {"supplier": o.supplier, "supplier_pn": o.supplier_pn, "stock": o.stock}
+            for o in offers
+        ],
+        "stock": [{"location": s.location, "quantity": s.quantity} for s in locations],
+    }
 
 
 def cmd_assets_acquire(args: argparse.Namespace) -> int:

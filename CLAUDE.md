@@ -154,6 +154,11 @@ These are the things that will bite an implementer who hasn't read the docs.
   missing hidden import starts fine and dies on the first request, which no import check finds.
 - **`klm doctor` exits 1 when a tool is missing**, by design (0 ok, 1 check failed, 2 klm errored).
   CI smoke tests must tolerate 1 and fail only on ≥2, or the release job is red on every run.
+- **README screenshots are generated from the running app** (`tools/screenshots.py`: seed a demo
+  catalog → `klm serve` → Playwright → framed PNGs in `docs/images/`). Never hand-draw a mock-up
+  of a screen; a README showing a UI the code does not produce is a lie with a long half-life.
+  They are committed rather than built in CI, because a README whose images come from a workflow
+  is broken on every fork. Two real UI bugs have been caught by looking at the output.
 - **`packaging/klm.ico` is generated, not committed.** One source image
   (`api/static/logo.png`); `make_icons.py` derives the rest. The tab favicon is a *separate,
   hand-drawn* `static/favicon.svg` — at 16 px the detailed artwork averages to a green square.

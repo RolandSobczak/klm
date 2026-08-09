@@ -51,7 +51,7 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Lint
-        run: ruff check src tests packaging
+        run: ruff check src tests packaging tools
 
       - name: Types
         run: mypy src/klm

@@ -462,7 +462,14 @@ def create_app(catalog: str | Path | None = None) -> Any:
                     }
                     for a in result.assignments
                 ],
-                "carts": {name: _json(cart) for name, cart in result.carts.items()},
+                # `total` is a property, and `asdict` only sees fields — without
+                # this the UI reads `undefined` for the one number the screen
+                # exists to show. Still a translation, not a computation: the
+                # arithmetic is the service's, this only carries it across.
+                "carts": {
+                    name: {**_json(cart), "total": cart.total}
+                    for name, cart in result.carts.items()
+                },
                 "unsourced": [line.mpn for line in result.unsourced],
                 "improvements": result.improvements,
                 "total": result.total,

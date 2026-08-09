@@ -14,6 +14,7 @@ from klm.cad.freecad import FreeCadUnavailable
 from klm.cli.main import EXIT_CHECK_FAILED, EXIT_ERROR, EXIT_OK, main, parse_age
 from klm.model import PartStatus
 from klm.services.catalog import get_part, list_parts
+from klm.services.stock import adjust
 from klm.store import AssetKind, AssetStore, Paths, connect, resolve_home
 from klm.store.db import SCHEMA_VERSION
 
@@ -927,3 +928,101 @@ def test_report_renders_a_markdown_table(home: Path, tmp_path: Path, capsys) -> 
     out = capsys.readouterr().out
     assert "| BOM lines | 1 |" in out
     assert "<details>" in out
+
+
+# ---------------------------------------------------------------------------
+# part approve / deprecate / show
+# ---------------------------------------------------------------------------
+#
+# These exist because the GUI had them and the CLI did not, which by this
+# project's own rule is a bug in the CLI rather than a feature of the GUI.
+
+
+def test_part_approve_and_deprecate_move_the_status(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    store = AssetStore(Paths(home).assets)
+    conn = connect(Paths(home).db, create=False)
+    try:
+        part = seed_resistor(store, conn, status=PartStatus.DRAFT)
+    finally:
+        conn.close()
+    capsys.readouterr()
+
+    assert main(["part", "approve", part.mpn]) == EXIT_OK
+    assert "draft → approved" in capsys.readouterr().out
+
+    assert main(["part", "deprecate", part.klm_id]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "approved → deprecated" in out
+    # S005: a deprecated part stops being generated, and anything already using
+    # it keeps working from its vendored copy. Worth saying out loud.
+    assert "stop being generated" in out
+
+    conn = connect(Paths(home).db, create=False)
+    try:
+        stored = get_part(conn, part.klm_id)
+    finally:
+        conn.close()
+    assert stored is not None and stored.status is PartStatus.DEPRECATED
+
+
+def test_approving_twice_is_not_an_error(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Idempotent, because a script that runs twice should not fail the second time."""
+    assert main(["init"]) == EXIT_OK
+    conn = connect(Paths(home).db, create=False)
+    try:
+        part = seed_resistor(AssetStore(Paths(home).assets), conn)
+    finally:
+        conn.close()
+    capsys.readouterr()
+
+    assert main(["part", "approve", part.mpn]) == EXIT_OK
+    assert "already approved" in capsys.readouterr().out
+
+
+def test_approving_an_unknown_part_says_so(home: Path) -> None:
+    assert main(["init"]) == EXIT_OK
+    assert main(["part", "approve", "NOT-A-PART"]) == EXIT_ERROR
+
+
+def test_part_show_reports_offers_and_stock(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    conn = connect(Paths(home).db, create=False)
+    try:
+        part = seed_resistor(AssetStore(Paths(home).assets), conn)
+        adjust(conn, part.klm_id, "Cabinet A/1", set_to=42)
+    finally:
+        conn.close()
+    capsys.readouterr()
+
+    assert main(["part", "show", part.mpn]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "RC0402FR-074K7L" in out
+    assert "Cabinet A/1" in out
+    assert "none — `klm refresh` fetches them" in out
+
+
+def test_part_show_json_matches_what_the_api_serves(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The CLI and the GUI must describe a part the same way (docs/12 §1)."""
+    assert main(["init"]) == EXIT_OK
+    conn = connect(Paths(home).db, create=False)
+    try:
+        part = seed_resistor(AssetStore(Paths(home).assets), conn)
+    finally:
+        conn.close()
+    capsys.readouterr()
+
+    assert main(["part", "show", part.klm_id, "--format", "json"]) == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["klm_id"] == part.klm_id
+    assert payload["mpn"] == part.mpn
+    assert payload["status"] == str(part.status)
+    assert payload["symbol_hash"] == part.symbol_hash

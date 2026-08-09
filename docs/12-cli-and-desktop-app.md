@@ -18,14 +18,14 @@ The rule: if the GUI can do something the CLI cannot, that is a bug in the CLI.
 klm init                         Set up the catalog, register with KiCad
 klm doctor                       Check external tools, config, KiCad registration
 
-PARTS
-klm part add --lcsc C8734 | --mpn X --mfr Y | --interactive
-klm part show <klm_id|mpn>
-klm part search <query> [--category …] [--in-stock] [--supplier tme]
-klm part edit <klm_id>
-klm part approve <klm_id>
-klm part deprecate <klm_id> [--successor <klm_id>]
-klm part merge <from> <into>
+PARTS                                               ✓ built · ○ not yet
+✓ klm part add --mpn X --mfr Y [--category …] [--package …] [--value …] [--offline]
+✓ klm part show <klm_id|mpn> [--format json]
+✓ klm part approve <klm_id|mpn>
+✓ klm part deprecate <klm_id|mpn>
+○ klm part search <query> [--category …] [--in-stock] [--supplier tme]
+○ klm part edit <klm_id>
+○ klm part merge <from> <into>
 
 ASSETS
 klm assets acquire <klm_id>

@@ -25,7 +25,11 @@ const el = (tag, attrs = {}, ...kids) => {
   return node;
 };
 const $ = (id) => document.getElementById(id);
-const show = (id, ...nodes) => { const n = $(id); n.replaceChildren(...nodes.flat()); };
+// `replaceChildren` stringifies anything that is not a Node, so a `null` from a
+// `cond ? el(...) : null` renders as the *word* "null" on the page. `el` already
+// filters them out of its children; this is the same guard one level up.
+const show = (id, ...nodes) =>
+  $(id).replaceChildren(...nodes.flat().filter((n) => n !== null && n !== undefined));
 const fail = (id, error) => show(id, el("p", { class: "error" }, error.message));
 
 // -- tabs -------------------------------------------------------------
