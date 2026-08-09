@@ -10,6 +10,7 @@ Exit codes are uniform across every command (docs/12 §2):
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sqlite3
 import sys
@@ -17,11 +18,16 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from klm import __version__
+from klm.config import load_config
 from klm.environment import find_kicad_config, probe_all
+from klm.hooks import HOOK_BLOCK, HOOK_ID, PRE_COMMIT_CONFIG, PRE_COMMIT_TEMPLATE
+from klm.model import PartStatus
 from klm.serial.part_file import to_yaml
 from klm.services.catalog import list_parts
 from klm.services.exporter import PART_FILE, export_catalog, import_catalog
 from klm.services.generate import generate
+from klm.services.importer import import_symbol_library
+from klm.services.lint import RULES, LintReport, Selector, Severity, lint_catalog
 from klm.services.register import apply_plan, plan_registration
 from klm.store import AssetKind, AssetStore, Paths, connect, migrate
 from klm.store.db import SCHEMA_VERSION, user_version
@@ -85,7 +91,61 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Stop at the first malformed file instead of collecting errors.",
     )
+    importer.add_argument(
+        "--from-kicad",
+        metavar="FILE",
+        help="Import symbols from an existing .kicad_sym library instead.",
+    )
+    importer.add_argument(
+        "--status",
+        choices=[str(s) for s in PartStatus],
+        default=str(PartStatus.DRAFT),
+        help="Status for imported parts (default: draft).",
+    )
+    importer.add_argument(
+        "--category",
+        metavar="PATH",
+        help="Category to file imported parts under, e.g. Passive/Resistor.",
+    )
     importer.set_defaults(func=cmd_import)
+
+    lint = sub.add_parser("lint", help="Check the catalog against the field schema.")
+    lint.add_argument(
+        "--select",
+        metavar="RULES",
+        help="Only these rules or groups, comma-separated (e.g. S,V001).",
+    )
+    lint.add_argument("--ignore", metavar="RULES", help="Skip these rules or groups.")
+    lint.add_argument("--fix", action="store_true", help="Apply the mechanical fixes.")
+    lint.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="With --fix, report what would change without writing.",
+    )
+    lint.add_argument(
+        "--format", choices=("text", "json"), default="text", help="Output format."
+    )
+    lint.add_argument(
+        "--max-severity",
+        choices=("error", "warning"),
+        help="Lowest severity that fails the command (default: error).",
+    )
+    lint.add_argument("--rules", action="store_true", help="List every rule and exit.")
+    lint.set_defaults(func=cmd_lint)
+
+    hook = sub.add_parser("hook", help="Install klm's pre-commit hook in a repository.")
+    hook.add_argument(
+        "directory",
+        nargs="?",
+        default=".",
+        help="Repository to install into (default: the current directory).",
+    )
+    hook.add_argument(
+        "--check",
+        action="store_true",
+        help="Report whether the hook is configured; non-zero if it is not.",
+    )
+    hook.set_defaults(func=cmd_hook)
 
     gen = sub.add_parser("generate", help="Rebuild the KiCad libraries from the catalog.")
     gen.set_defaults(func=cmd_generate)
@@ -361,6 +421,9 @@ def cmd_import(args: argparse.Namespace) -> int:
     paths = Paths.resolve(args.catalog)
     _require_catalog(paths)
 
+    if args.from_kicad:
+        return _import_from_kicad(paths, args)
+
     conn = connect(paths.db, create=False)
     try:
         result = import_catalog(conn, paths.catalog, strict=args.strict)
@@ -378,6 +441,157 @@ def cmd_import(args: argparse.Namespace) -> int:
             print(f"    {message}")
         print(f"\n{len(result.errors)} file(s) could not be imported.")
         return EXIT_CHECK_FAILED
+    return EXIT_OK
+
+
+def _import_from_kicad(paths: Paths, args: argparse.Namespace) -> int:
+    """`klm import --from-kicad` — the on-ramp for an existing library."""
+    source = Path(args.from_kicad).expanduser()
+    if not source.exists():
+        print(f"klm: no such file: {source}", file=sys.stderr)
+        return EXIT_ERROR
+
+    config = load_config(paths.config)
+    store = AssetStore(paths.assets)
+    conn = connect(paths.db, create=False)
+    try:
+        report = import_symbol_library(
+            conn,
+            store,
+            source,
+            config=config,
+            status=PartStatus(args.status),
+            category=args.category,
+        )
+    finally:
+        conn.close()
+
+    print(
+        f"{_OK} imported {len(report.imported)} symbol(s) from {source.name}: "
+        f"{report.created} created, {report.updated} updated"
+    )
+    for name, reason in report.skipped:
+        print(f"{_WARN} skipped {name}: {reason}")
+    print()
+    print("Next: klm lint --select S002,V001 --fix --dry-run")
+    return EXIT_OK if report.ok else EXIT_CHECK_FAILED
+
+
+# ---------------------------------------------------------------------------
+# lint
+# ---------------------------------------------------------------------------
+
+
+def cmd_lint(args: argparse.Namespace) -> int:
+    if args.rules:
+        for rule in RULES.values():
+            mark = "fixable" if rule.fixable else ""
+            print(f"{rule.id}  {rule.severity:<8}{mark:<9}{rule.summary}")
+        return EXIT_OK
+
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    config = load_config(paths.config)
+
+    selector = Selector(
+        select=_rule_list(args.select) or config.lint.select,
+        ignore=_rule_list(args.ignore) or config.lint.ignore,
+    )
+    store = AssetStore(paths.assets)
+    conn = connect(paths.db, create=False)
+    try:
+        report = lint_catalog(
+            conn, store, config, selector=selector, fix=args.fix, dry_run=args.dry_run
+        )
+    finally:
+        conn.close()
+
+    max_severity = args.max_severity or config.lint.max_severity
+    if args.format == "json":
+        print(_lint_json(report))
+    else:
+        _print_lint(report, fix=args.fix, dry_run=args.dry_run)
+    return EXIT_CHECK_FAILED if report.failed(max_severity) else EXIT_OK
+
+
+def _rule_list(raw: str | None) -> tuple[str, ...]:
+    return tuple(item.strip() for item in (raw or "").split(",") if item.strip())
+
+
+def _print_lint(report: LintReport, *, fix: bool, dry_run: bool) -> None:
+    for finding in report.findings:
+        print(finding)
+
+    errors = report.count(Severity.ERROR)
+    warnings = report.count(Severity.WARNING)
+    fixed = len(report.fixed)
+    print()
+    if fix and fixed:
+        verb = "would fix" if dry_run else "fixed"
+        print(f"{_OK} {verb} {fixed} finding(s)")
+    if not errors and not warnings:
+        print(f"{_OK} {report.parts_checked} part(s) checked, nothing to report")
+        return
+    print(
+        f"{_FAIL if errors else _WARN} {report.parts_checked} part(s) checked: "
+        f"{errors} error(s), {warnings} warning(s)"
+    )
+    if any(f.fixable for f in report.findings if not f.fixed) and not fix:
+        print("    → some findings are fixable: klm lint --fix --dry-run")
+
+
+def _lint_json(report: LintReport) -> str:
+    payload = {
+        "parts_checked": report.parts_checked,
+        "errors": report.count(Severity.ERROR),
+        "warnings": report.count(Severity.WARNING),
+        "findings": [
+            {
+                "rule": f.rule,
+                "severity": str(f.severity),
+                "location": f.location,
+                "message": f.message,
+                "fixable": f.fixable,
+                "fixed": f.fixed,
+            }
+            for f in report.findings
+        ],
+    }
+    return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# hook
+# ---------------------------------------------------------------------------
+
+
+def cmd_hook(args: argparse.Namespace) -> int:
+    directory = Path(args.directory).expanduser().resolve()
+    target = directory / PRE_COMMIT_CONFIG
+
+    if args.check:
+        if target.exists() and HOOK_ID in target.read_text(encoding="utf-8"):
+            print(f"{_OK} {target} runs klm lint")
+            return EXIT_OK
+        print(f"{_FAIL} {target} does not run klm lint")
+        return EXIT_CHECK_FAILED
+
+    if not target.exists():
+        target.write_text(PRE_COMMIT_TEMPLATE, encoding="utf-8")
+        print(f"{_OK} wrote {target}")
+    elif HOOK_ID in target.read_text(encoding="utf-8"):
+        print(f"{_OK} {target} already runs klm lint")
+        return EXIT_OK
+    else:
+        # Merging into someone's existing hook config means parsing YAML klm
+        # did not write. Printing the block is honest and costs one paste.
+        print(f"{_WARN} {target} exists; add this to its `repos:` list:")
+        print()
+        print(HOOK_BLOCK)
+        return EXIT_CHECK_FAILED
+
+    print()
+    print("Next: pre-commit install")
     return EXIT_OK
 
 

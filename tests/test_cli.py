@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -233,3 +234,95 @@ def test_unexpected_errors_become_exit_code_2(
     monkeypatch.setattr("klm.cli.main.connect", explode)
     assert main(["init"]) == EXIT_ERROR
     assert "disk on fire" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# import --from-kicad / lint / hook
+# ---------------------------------------------------------------------------
+
+DRIFTED = Path(__file__).parent / "fixtures" / "drifted_library.kicad_sym"
+
+
+def test_import_from_kicad_reports_what_it_skipped(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    # A library with a derived symbol is partially imported, and says so.
+    assert main(["import", "--from-kicad", str(DRIFTED)]) == EXIT_CHECK_FAILED
+    out = capsys.readouterr().out
+    assert "imported 2 symbol(s)" in out
+    assert "R_Small_Derived" in out
+
+
+def test_import_from_kicad_rejects_a_missing_file(home: Path) -> None:
+    assert main(["init"]) == EXIT_OK
+    assert main(["import", "--from-kicad", str(home / "nope.kicad_sym")]) == EXIT_ERROR
+
+
+def test_lint_exit_code_follows_max_severity(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    main(["import", "--from-kicad", str(DRIFTED), "--category", "Passive/Resistor"])
+    capsys.readouterr()
+
+    assert main(["lint", "--select", "S002"]) == EXIT_OK
+    assert main(["lint", "--select", "S002", "--max-severity", "warning"]) == EXIT_CHECK_FAILED
+
+
+def test_lint_fix_leaves_the_catalog_clean_of_fixable_findings(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    main(["import", "--from-kicad", str(DRIFTED), "--category", "Passive/Resistor"])
+    capsys.readouterr()
+
+    assert main(["lint", "--select", "S002,V001", "--fix"]) == EXIT_OK
+    assert "fixed" in capsys.readouterr().out
+    assert main(["lint", "--select", "S002,V001", "--max-severity", "warning"]) == EXIT_OK
+
+
+def test_lint_json_output_is_machine_readable(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    main(["import", "--from-kicad", str(DRIFTED)])
+    capsys.readouterr()
+
+    main(["lint", "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["parts_checked"] == 2
+    assert {"rule", "severity", "location", "message", "fixable", "fixed"} <= set(
+        payload["findings"][0]
+    )
+
+
+def test_lint_rules_listing_needs_no_catalog(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["lint", "--rules"]) == EXIT_OK
+    assert "S002" in capsys.readouterr().out
+
+
+def test_hook_writes_a_config_and_is_idempotent(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    assert main(["hook", str(repo)]) == EXIT_OK
+    assert "klm-lint" in (repo / ".pre-commit-config.yaml").read_text(encoding="utf-8")
+
+    assert main(["hook", "--check", str(repo)]) == EXIT_OK
+    assert main(["hook", str(repo)]) == EXIT_OK
+
+
+def test_hook_never_rewrites_someone_elses_config(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    existing = "repos:\n  - repo: local\n    hooks: []\n"
+    (repo / ".pre-commit-config.yaml").write_text(existing, encoding="utf-8")
+
+    assert main(["hook", "--check", str(repo)]) == EXIT_CHECK_FAILED
+    assert main(["hook", str(repo)]) == EXIT_CHECK_FAILED
+    assert (repo / ".pre-commit-config.yaml").read_text(encoding="utf-8") == existing
+    assert "klm-lint" in capsys.readouterr().out

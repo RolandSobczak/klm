@@ -8,11 +8,22 @@ variable.
 
 from __future__ import annotations
 
+import re
 from pathlib import PurePath
 
 from klm.kicad.sexpr import Atom, Document, SExp
 
-__all__ = ["footprint_name", "model_paths", "rewrite_model_paths"]
+__all__ = [
+    "absolute_model_paths",
+    "footprint_name",
+    "is_absolute_model_path",
+    "model_paths",
+    "rewrite_model_paths",
+]
+
+#: `/home/rs/…`, `C:\…` and `\\server\…`. A `${VAR}/…` reference is portable
+#: and a relative one resolves against the project, so neither is a problem.
+_ABSOLUTE = re.compile(r"^(?:/|[A-Za-z]:[\\/]|\\\\)")
 
 
 def footprint_name(doc: Document | SExp) -> str | None:
@@ -34,6 +45,16 @@ def model_paths(doc: Document | SExp) -> list[str]:
     return out
 
 
+def is_absolute_model_path(path: str) -> bool:
+    """True for a path that only resolves on the machine that wrote it."""
+    return bool(_ABSOLUTE.match(path.strip()))
+
+
+def absolute_model_paths(doc: Document | SExp) -> list[str]:
+    """Model references that would not resolve on anyone else's machine."""
+    return [path for path in model_paths(doc) if is_absolute_model_path(path)]
+
+
 def rewrite_model_paths(
     doc: Document | SExp, *, env_var: str = "KLM_3DMODELS", filename: str | None = None
 ) -> int:
@@ -43,8 +64,9 @@ def rewrite_model_paths(
     is left alone — a footprint referencing a ``.wrl`` keeps referencing a
     ``.wrl`` until something actually converts it.
 
-    Returns the number of references rewritten, so a caller can report that a
-    footprint had no model rather than silently succeeding.
+    Returns the number of references whose value actually changed, so a caller
+    can tell "already correct" from "rewritten" — `klm lint --fix` reports a fix
+    only when there was one.
     """
     root = doc.root if isinstance(doc, Document) else doc
     count = 0
@@ -53,6 +75,8 @@ def rewrite_model_paths(
             continue
         target = node[1]
         name = filename or PurePath(target.value.replace("\\", "/")).name
-        target.value = f"${{{env_var}}}/{name}"
-        count += 1
+        rewritten = f"${{{env_var}}}/{name}"
+        if target.value != rewritten:
+            target.value = rewritten
+            count += 1
     return count
