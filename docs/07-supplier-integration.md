@@ -30,19 +30,30 @@ quirks are absorbed inside the adapter and never leak.
 TME is the domestic supplier: fast delivery, invoicing, PLN pricing, the default for anything
 needed this week.
 
-- **API**: a documented REST API requiring registration at `developers.tme.eu` for an application
-  token and secret. Relevant operations: `Products/Search`, `Products/GetProducts` (details),
-  `Products/GetPricesAndStocks`, `Products/GetParameters`, `Products/GetProductsFiles`
-  (datasheets).
-- **Authentication**: request signing — [Q1](14-open-questions.md#q1) is resolved, and the original
-  note's OAuth 2.0 claim was wrong. Each request carries an HMAC-SHA1 signature over
-  `POST&<percent-encoded URL>&<percent-encoded sorted query string>`, base64-encoded, sent as the
-  `ApiSignature` parameter. Parameters are sorted and flattened into `Name[0]` form *before*
-  signing. A bad signature returns `E_INVALID_SIGNATURE` and nothing else useful, so
-  `signature_base()` is a public pure function with its own tests rather than something buried in
-  the request path.
-- **Pricing**: net vs gross (VAT) matters for a Polish buyer. klm stores net prices and displays
-  gross, with the VAT rate configurable.
+- **API**: the **v2** REST API, registration at `developers.tme.eu` for an application token and
+  secret. Operations klm uses: `GET /products/search` (keyword *and* parametric),
+  `GET /products` (details, by `symbols[]` or `mpns[]`), `GET /products/data`
+  (prices, stock), `GET /products/categories/tree`, `GET /products/files` (datasheets).
+- **Authentication**: OAuth 2.0 client credentials. `POST /auth/token` with
+  `Authorization: Basic base64(token:secret)` and `grant_type=client_credentials` returns a bearer
+  token that **expires in 300 seconds**, plus a refresh token. Five minutes is short enough that a
+  single `klm refresh` over a few hundred parts outlives it, so the adapter renews 30 seconds early
+  and retries once on a 401 — expiry mid-flight is the normal case, not an error.
+
+  klm targeted **v1** until 2026-08-09: signed form POSTs with an HMAC-SHA1 signature over
+  `POST&<encoded URL>&<encoded sorted query>`. That is what [Q1](14-open-questions.md#q1)
+  documented, and it still answers — but TME calls it deprecated and v2 differs in every respect.
+  Migrated before anyone depended on v1, which is the cheap moment. See the Q1 addendum.
+- **Parametric search** filters by **numeric parameter and value identifiers**, not names or
+  comparisons ([Q10](14-open-questions.md#q10--parametric-search-quality-at-tme-and-lcsc--resolved-2026-08-09)).
+  `klm.suppliers.constraints` turns `{"Vin max": ">=18V"}` into those IDs, using
+  `scope[]=parameters` for discovery and `klm.units` for the arithmetic. Nothing above the adapter
+  ever handles an identifier — a wrong one returns confidently wrong parts rather than an error.
+- **Pricing**: net vs gross (VAT) matters for a Polish buyer. klm stores net and displays gross,
+  with the VAT rate configurable. **v2 states which it returned** (`prices.type` is `NET` or
+  `GROSS`, with the tax rate beside it), so the adapter converts rather than assuming — v1 always
+  returned net, and taking a gross ladder as net would inflate every landed-cost comparison by the
+  whole rate.
 - **Currency**: PLN natively.
 - **Quirks**: TME "symbols" are its own part identifiers, not MPNs, and a symbol may include a
   packaging suffix. The adapter records both the symbol and the manufacturer MPN it maps to.

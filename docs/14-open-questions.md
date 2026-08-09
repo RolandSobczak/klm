@@ -25,7 +25,9 @@ The original design note was wrong. TME's scheme is request signing:
 - Tokens come in two kinds: anonymous (public data) and private (linked to a TME customer
   account). klm needs only the former for sourcing.
 - A bad signature returns `E_INVALID_SIGNATURE` and nothing more diagnostic, which is why
-  `klm.suppliers.tme.signature_base` is a public pure function with its own tests.
+  `signature_base` was a public pure function with its own tests. *(Removed with the v2
+  migration — see the addendum below; this entry is kept because it is why v1 was built the way
+  it was.)*
 
 **Addendum (2026-08-09), from the Q10 work: v2 differs completely, and it *is* OAuth.**
 
@@ -46,10 +48,24 @@ Both APIs answer today and nothing is broken. But TME's own repository calls the
 targets *deprecated*, and the signing scheme this entry documents does not exist in v2. Rate limits
 remain unpublished either way; the conservative 2 req/s default stands.
 
-**What this costs when v1 goes:** authentication is one function deep as designed, so that part is
-cheap. The endpoint shapes are not — `_call`'s `Action` convention, the `SymbolList` batching and
-every response key would move. Worth doing deliberately, ahead of an outage, rather than the day
-v1 stops answering.
+**Migrated, 2026-08-09.** The adapter is on v2: the token grant with early renewal and a
+single 401 retry, `GET /products/search`, `/products`, `/products/data`,
+`/products/categories/tree` and `/products/files`. v1's signing functions are gone.
+
+**What is not verified, and cannot be here.** klm's authors hold no TME credentials, so no request
+in the new adapter has ever reached the live API. Every shape is taken from TME's published
+OpenAPI document and pinned by tests built from it — which proves the client matches the
+specification, not that the specification matches the server. The first real call is the test, and
+these are the things most likely to differ:
+
+- whether `data.elements` is the wrapper on every list endpoint (assumed; `/products/search`
+  demonstrably nests under `data.products.elements` instead, which is why the unwrapping is
+  tolerant of both);
+- the document `type` marking a datasheet — v1 used `DTE`, and the adapter accepts that plus two
+  plausible v2 spellings rather than guessing one;
+- whether a bearer token is rejected with 401 or with an application-level status.
+
+Rate limits remain unpublished; the conservative 2 req/s default stands.
 
 ---
 

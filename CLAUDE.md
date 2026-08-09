@@ -225,11 +225,14 @@ These are the things that will bite an implementer who hasn't read the docs.
   confidently wrong parts rather than an error, which is the invented-MPN failure again. LCSC has
   no search klm may use at all (ADR-0009), so `supplier_search` is TME-only. The DigiKey/Mouser
   parametric-index fallback is dropped: it was for a weak TME, and TME is not weak.
-- **TME v1 vs v2 — a live risk, found while answering Q10.** klm implements v1 (HMAC-SHA1
-  signature, `Products/Action`). v2 is OAuth2 `client_credentials` with a **300-second** bearer
-  token and REST paths. Both answer today; TME calls v1 deprecated. `search_parametric`'s request
-  shape was never verified against either and must be rebuilt on v2 *before* the agent stands on
-  it. See the Q1 addendum.
+- **The TME adapter is on v2** (migrated 2026-08-09, before anyone depended on v1). OAuth2
+  `client_credentials`, a **300-second** bearer token renewed 30 s early with one 401 retry, and
+  REST GETs. **No request has ever reached the live API** — klm's authors hold no TME credentials,
+  so every shape comes from TME's published OpenAPI document and the tests pin the document, not
+  the server. Treat a field-name mismatch as expected on first real use, not as a regression.
+- **v2 states whether a price ladder is NET or GROSS.** v1 was always net. Read `prices.type` and
+  convert; applying the configured VAT rate to a gross price inflates every landed-cost comparison
+  by the whole rate.
 
 - **Q1 — resolved.** TME's auth is signature-based, not OAuth: HMAC-SHA1 over
   `POST&<enc URL>&<enc sorted query>`, base64, sent as `ApiSignature`. Still unverified: published

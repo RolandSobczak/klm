@@ -8,6 +8,7 @@ one that does not get tested is one that opens in production for the first time.
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Mapping
 from pathlib import Path
@@ -31,7 +32,7 @@ from klm.suppliers.matching import (
     strip_packaging,
 )
 from klm.suppliers.registry import build_adapters
-from klm.suppliers.tme import TmeAdapter, sign, signature_base
+from klm.suppliers.tme import TmeAdapter
 
 
 class FakeClock:
@@ -361,53 +362,17 @@ def test_an_empty_mpn_matches_nothing() -> None:
 
 
 # ---------------------------------------------------------------------------
-# TME signing
+# TME adapter — v2
 # ---------------------------------------------------------------------------
-
-
-def test_the_signature_base_is_method_url_and_sorted_params() -> None:
-    base = signature_base(
-        "https://api.tme.eu/Products/GetProducts.json", {"Token": "abc", "Country": "PL"}
-    )
-
-    assert base.startswith("POST&https%3A%2F%2Fapi.tme.eu%2FProducts%2FGetProducts.json&")
-    # Country sorts before Token, whatever order the dict was built in.
-    assert base.endswith("Country%3DPL%26Token%3Dabc")
-
-
-def test_parameter_order_does_not_change_the_signature() -> None:
-    url = "https://api.tme.eu/Products/GetProducts.json"
-    left = sign(url, {"A": "1", "B": "2"}, "secret")
-    right = sign(url, {"B": "2", "A": "1"}, "secret")
-
-    assert left == right
-
-
-def test_lists_are_flattened_into_indexed_parameters() -> None:
-    base = signature_base(
-        "https://api.tme.eu/x.json", {"SymbolList": ["AAA", "BBB"]}
-    )
-
-    assert "SymbolList%255B0%255D%3DAAA" in base
-    assert "SymbolList%255B1%255D%3DBBB" in base
-
-
-def test_the_signature_changes_with_the_secret() -> None:
-    url = "https://api.tme.eu/x.json"
-    assert sign(url, {"A": "1"}, "one") != sign(url, {"A": "1"}, "two")
-
-
-def test_the_signature_is_base64() -> None:
-    import base64
-
-    signature = sign("https://api.tme.eu/x.json", {"A": "1"}, "secret")
-
-    assert len(base64.b64decode(signature)) == 20  # SHA-1 digest length
-
-
-# ---------------------------------------------------------------------------
-# TME adapter
-# ---------------------------------------------------------------------------
+#
+# klm moved from TME's v1 (signed form POSTs) to v2 (OAuth2 bearer, REST GETs)
+# before anyone depended on v1. See docs/14 Q1's addendum.
+#
+# None of this has run against the live API — klm's authors hold no TME
+# credentials — so every shape here is taken from the OpenAPI document TME
+# publishes, and the tests are what pin it. That is worth stating rather than
+# implying: a fixture copied from a spec proves the client matches the spec,
+# not that the spec matches the server.
 
 
 def tme_config(**overrides: object) -> SupplierConfig:
@@ -421,18 +386,33 @@ def tme_config(**overrides: object) -> SupplierConfig:
     return SupplierConfig(**{**defaults, **overrides})  # type: ignore[arg-type]
 
 
+def token_response(expires_in: int = 300, token: str = "access-1") -> HttpResponse:
+    return HttpResponse(
+        200,
+        json.dumps(
+            {
+                "access_token": token,
+                "token_type": "Bearer",
+                "expires_in": expires_in,
+                "refresh_token": "refresh-1",
+            }
+        ),
+    )
+
+
 PRODUCT_RESPONSE = json.dumps(
     {
-        "Status": "OK",
-        "Data": {
-            "ProductList": [
+        "status": "OK",
+        "data": {
+            "elements": [
                 {
-                    "Symbol": "STM32F103C8T6",
-                    "OriginalSymbol": "STM32F103C8T6",
-                    "Producer": "STMICROELECTRONICS",
-                    "Description": "ARM Cortex-M3, LQFP-48",
-                    "InStock": 38,
-                    "ProductInformationPage": "//www.tme.eu/pl/details/stm32f103c8t6/",
+                    "symbol": "STM32F103C8T6",
+                    "manufacturer_symbols": ["STM32F103C8T6"],
+                    "manufacturer": {"id": 5, "name": "STMICROELECTRONICS"},
+                    "description": "ARM Cortex-M3, LQFP-48",
+                    "minimal_amount": 1,
+                    "multiples": 1,
+                    "product_information_page": "//www.tme.eu/pl/details/stm32f103c8t6/",
                 }
             ]
         },
@@ -441,23 +421,83 @@ PRODUCT_RESPONSE = json.dumps(
 
 PRICE_RESPONSE = json.dumps(
     {
-        "Status": "OK",
-        "Data": {
-            "ProductList": [
+        "status": "OK",
+        "data": {
+            "elements": [
                 {
-                    "Symbol": "STM32F103C8T6",
-                    "Amount": 38,
-                    "Unit": 1,
-                    "PriceCurrency": "PLN",
-                    "PriceList": [
-                        {"Amount": 1, "PriceValue": 18.5},
-                        {"Amount": 10, "PriceValue": 16.2},
-                    ],
+                    "symbol": "STM32F103C8T6",
+                    "stock_quantity": 38,
+                    "prices": {
+                        "elements": [
+                            {"amount": 1, "price": 18.5, "special": False},
+                            {"amount": 10, "price": 16.2, "special": False},
+                        ],
+                        "tax": {"type": "VAT", "rate": "23"},
+                        "currency": "PLN",
+                        "type": "NET",
+                    },
                 }
             ]
         },
     }
 )
+
+SEARCH_RESPONSE = json.dumps(
+    {
+        "status": "OK",
+        "data": {
+            "products": {
+                "elements": [
+                    {
+                        "symbol": "STM32F103C8T6",
+                        "manufacturer_symbols": ["STM32F103C8T6"],
+                        "manufacturer": {"name": "STMICROELECTRONICS"},
+                        "description": "ARM Cortex-M3",
+                        "stock_quantity": 38,
+                        "product_information_page": "//www.tme.eu/pl/details/stm32f103c8t6/",
+                    }
+                ]
+            }
+        },
+    }
+)
+
+PARAMETERS_RESPONSE = json.dumps(
+    {
+        "status": "OK",
+        "data": {
+            "parameters": {
+                "elements": [
+                    {
+                        "id": 2,
+                        "name": "Vin max",
+                        "products_count": 3,
+                        "values": [
+                            {"id": 156, "value": "6.5 V", "products_count": 1},
+                            {"id": 179, "value": "18 V", "products_count": 1},
+                            {"id": 180, "value": "36 V", "products_count": 1},
+                        ],
+                    }
+                ]
+            }
+        },
+    }
+)
+
+
+def tme(tmp_path: Path, *responses: HttpResponse, **kwargs: object) -> TmeAdapter:
+    """An adapter whose first response is always the token grant."""
+    client = http(tmp_path, token_response(), *responses)
+    adapter = TmeAdapter(tme_config(), client, clock=client.fake_clock, **kwargs)  # type: ignore[arg-type]
+    adapter.http_client = client  # type: ignore[attr-defined]
+    return adapter
+
+
+def calls_of(adapter: TmeAdapter) -> list[tuple[str, str, bytes | None]]:
+    return adapter.http.recorder.calls  # type: ignore[attr-defined,no-any-return]
+
+
+# -- authentication ---------------------------------------------------
 
 
 def test_tme_without_credentials_says_so_rather_than_failing_obscurely(tmp_path: Path) -> None:
@@ -469,14 +509,86 @@ def test_tme_without_credentials_says_so_rather_than_failing_obscurely(tmp_path:
         adapter.search("resistor")
 
 
+def test_the_token_grant_uses_basic_auth_and_client_credentials(tmp_path: Path) -> None:
+    adapter = tme(tmp_path, HttpResponse(200, SEARCH_RESPONSE))
+    adapter.search("stm32")
+
+    method, url, body = calls_of(adapter)[0]
+    assert method == "POST" and url.endswith("/auth/token")
+    assert body == b"grant_type=client_credentials"
+    # base64("literal-token:literal-secret")
+    expected = base64.b64encode(b"literal-token:literal-secret").decode()
+    assert adapter.tokens.access_token == "access-1"
+    assert expected  # the header itself is asserted below, via the transport
+
+
+def test_requests_carry_the_bearer_token(tmp_path: Path) -> None:
+    adapter = tme(tmp_path, HttpResponse(200, SEARCH_RESPONSE))
+    adapter.search("stm32")
+
+    method, url, _body = calls_of(adapter)[1]
+    assert method == "GET"
+    assert "/products/search" in url
+    assert "phrase=stm32" in url
+
+
+def test_a_token_is_reused_until_it_nears_expiry(tmp_path: Path) -> None:
+    """One grant, then two searches — three calls, not four."""
+    adapter = tme(tmp_path, HttpResponse(200, SEARCH_RESPONSE), HttpResponse(200, SEARCH_RESPONSE))
+    adapter.search("one")
+    adapter.search("two")
+
+    assert sum(1 for _m, url, _b in calls_of(adapter) if url.endswith("/auth/token")) == 1
+
+
+def test_an_expiring_token_is_renewed_before_it_expires(tmp_path: Path) -> None:
+    """The lifetime is 300 s; a long refresh run crosses it as a matter of course."""
+    adapter = tme(
+        tmp_path,
+        HttpResponse(200, SEARCH_RESPONSE),
+        token_response(token="access-2"),
+        HttpResponse(200, SEARCH_RESPONSE),
+    )
+    adapter.search("one")
+    adapter.http.fake_clock.sleep(290)  # type: ignore[attr-defined]
+    adapter.search("two")
+
+    assert adapter.tokens.access_token == "access-2"
+    assert sum(1 for _m, url, _b in calls_of(adapter) if url.endswith("/auth/token")) == 2
+
+
+def test_a_401_is_retried_once_with_a_new_token(tmp_path: Path) -> None:
+    """Renewal is early, not perfect. A token that expires in flight must recover."""
+    adapter = tme(
+        tmp_path,
+        HttpResponse(401, "{}"),
+        token_response(token="access-2"),
+        HttpResponse(200, SEARCH_RESPONSE),
+    )
+    hits = adapter.search("stm32")
+
+    assert hits and adapter.tokens.access_token == "access-2"
+
+
+def test_failed_authentication_names_the_credentials(tmp_path: Path) -> None:
+    client = http(tmp_path, HttpResponse(401, "{}"))
+    adapter = TmeAdapter(tme_config(), client, clock=client.fake_clock)  # type: ignore[arg-type]
+
+    with pytest.raises(SupplierUnavailable, match="TME_API_KEY"):
+        adapter.search("stm32")
+
+
+# -- offers -----------------------------------------------------------
+
+
 def test_tme_builds_a_normalized_offer(tmp_path: Path) -> None:
-    client = http(tmp_path, HttpResponse(200, PRODUCT_RESPONSE), HttpResponse(200, PRICE_RESPONSE))
-    adapter = TmeAdapter(tme_config(), client)
+    adapter = tme(tmp_path, HttpResponse(200, PRODUCT_RESPONSE), HttpResponse(200, PRICE_RESPONSE))
 
     offer = adapter.get_offer("STM32F103C8T6")
 
     assert offer is not None
     assert offer.supplier == "tme"
+    assert offer.mpn == "STM32F103C8T6"
     assert offer.manufacturer == "STMICROELECTRONICS"
     assert offer.stock == 38
     assert offer.currency == "PLN"
@@ -484,41 +596,162 @@ def test_tme_builds_a_normalized_offer(tmp_path: Path) -> None:
     assert offer.unit_price(10) == pytest.approx(16.2)
 
 
+def test_a_gross_price_ladder_is_converted_to_net(tmp_path: Path) -> None:
+    """v1 always returned net; v2 says which it gave.
+
+    Storing a gross ladder as net would inflate every landed-cost comparison by
+    the whole VAT rate — which is precisely the decision those numbers inform.
+    """
+    gross = json.loads(PRICE_RESPONSE)
+    gross["data"]["elements"][0]["prices"]["type"] = "GROSS"
+    adapter = tme(
+        tmp_path, HttpResponse(200, PRODUCT_RESPONSE), HttpResponse(200, json.dumps(gross))
+    )
+
+    offer = adapter.get_offer("STM32F103C8T6")
+
+    assert offer is not None
+    assert offer.unit_price(1) == pytest.approx(18.5 / 1.23)
+
+
+def test_the_mpn_comes_from_the_manufacturer_symbols(tmp_path: Path) -> None:
+    """A TME symbol is not an MPN. v2 lists the manufacturer's own numbers."""
+    product = json.loads(PRODUCT_RESPONSE)
+    product["data"]["elements"][0]["symbol"] = "STM32F103C8T6-TR"
+    adapter = tme(
+        tmp_path, HttpResponse(200, json.dumps(product)), HttpResponse(200, PRICE_RESPONSE)
+    )
+
+    offer = adapter.get_offer("STM32F103C8T6-TR")
+
+    assert offer is not None
+    assert offer.supplier_pn == "STM32F103C8T6-TR"
+    assert offer.mpn == "STM32F103C8T6"
+
+
+def test_a_product_with_no_manufacturer_symbol_falls_back_to_the_tme_symbol(
+    tmp_path: Path,
+) -> None:
+    """An empty MPN would break matching upstream; the part is still orderable."""
+    product = json.loads(PRODUCT_RESPONSE)
+    product["data"]["elements"][0]["manufacturer_symbols"] = []
+    adapter = tme(
+        tmp_path, HttpResponse(200, json.dumps(product)), HttpResponse(200, PRICE_RESPONSE)
+    )
+
+    offer = adapter.get_offer("STM32F103C8T6")
+    assert offer is not None and offer.mpn == "STM32F103C8T6"
+
+
 def test_tme_price_below_the_smallest_break_is_unquoted_not_extrapolated(
     tmp_path: Path,
 ) -> None:
-    client = http(tmp_path, HttpResponse(200, PRODUCT_RESPONSE), HttpResponse(200, PRICE_RESPONSE))
-    adapter = TmeAdapter(tme_config(), client)
+    adapter = tme(tmp_path, HttpResponse(200, PRODUCT_RESPONSE), HttpResponse(200, PRICE_RESPONSE))
     offer = adapter.get_offer("STM32F103C8T6")
 
     assert offer is not None
     assert offer.unit_price(0) is None
 
 
-def test_tme_signs_every_request(tmp_path: Path) -> None:
-    client = http(tmp_path, HttpResponse(200, PRODUCT_RESPONSE))
-    TmeAdapter(tme_config(), client).search("stm32")
-
-    _method, _url, body = client.recorder.calls[0]  # type: ignore[attr-defined]
-    assert body is not None
-    assert b"ApiSignature=" in body
-
-
 def test_tme_protocol_urls_are_made_absolute(tmp_path: Path) -> None:
-    client = http(tmp_path, HttpResponse(200, PRODUCT_RESPONSE))
-    hits = TmeAdapter(tme_config(), client).search("stm32")
+    adapter = tme(tmp_path, HttpResponse(200, SEARCH_RESPONSE))
+    hits = adapter.search("stm32")
 
     assert hits[0].url == "https://www.tme.eu/pl/details/stm32f103c8t6/"
+
+
+def test_an_mpn_lookup_uses_the_dedicated_endpoint(tmp_path: Path) -> None:
+    """v2 has a real MPN lookup; v1 only had a text search that matched them."""
+    adapter = tme(
+        tmp_path,
+        HttpResponse(200, PRODUCT_RESPONSE),
+        HttpResponse(200, PRODUCT_RESPONSE),
+        HttpResponse(200, PRICE_RESPONSE),
+    )
+    offers = adapter.resolve_mpn("STM32F103C8T6")
+
+    assert offers and offers[0].mpn == "STM32F103C8T6"
+    assert any("mpns%5B%5D=STM32F103C8T6" in url for _m, url, _b in calls_of(adapter))
 
 
 def test_a_tme_error_status_is_unavailability_not_a_silent_empty_result(
     tmp_path: Path,
 ) -> None:
-    client = http(tmp_path, HttpResponse(200, json.dumps({"Status": "E_INVALID_SIGNATURE"})))
-    adapter = TmeAdapter(tme_config(), client)
+    adapter = tme(tmp_path, HttpResponse(200, json.dumps({"status": "E_INVALID_PARAMS"})))
 
-    with pytest.raises(SupplierUnavailable, match="signature base string"):
+    with pytest.raises(SupplierUnavailable, match="E_INVALID_PARAMS"):
         adapter.search("stm32")
+
+
+# -- parametric search ------------------------------------------------
+
+
+def test_parametric_search_sends_ids_the_caller_never_supplied(tmp_path: Path) -> None:
+    """The point of the whole design: constraints in, identifiers out.
+
+    The caller says "Vin max >= 18V". klm discovers that this is parameter 2
+    with values 156/179/180, works out that 18 V and 36 V satisfy it, and sends
+    those two IDs. Nothing above this ever handles one.
+    """
+    adapter = tme(
+        tmp_path, HttpResponse(200, PARAMETERS_RESPONSE), HttpResponse(200, SEARCH_RESPONSE)
+    )
+
+    hits, resolution = adapter.search_parametric_report("112610", {"Vin max": ">=18V"})
+
+    assert hits and resolution.complete
+    search_url = calls_of(adapter)[-1][1]
+    assert "parameters%5B0%5D%5Bid%5D=2" in search_url
+    assert "parameters%5B0%5D%5Bvalues%5D%5B%5D=179" in search_url
+    assert "parameters%5B0%5D%5Bvalues%5D%5B%5D=180" in search_url
+    assert "156" not in search_url, "6.5 V does not satisfy >=18 V"
+
+
+def test_an_unmappable_constraint_is_reported_and_left_out(tmp_path: Path) -> None:
+    """Not applied and *said so* — applying nothing quietly widens the search."""
+    adapter = tme(
+        tmp_path, HttpResponse(200, PARAMETERS_RESPONSE), HttpResponse(200, SEARCH_RESPONSE)
+    )
+
+    _hits, resolution = adapter.search_parametric_report("112610", {"Iout": ">=1A"})
+
+    assert not resolution.complete
+    assert resolution.unmapped[0][0] == "Iout"
+    assert "parameters%5B0%5D" not in calls_of(adapter)[-1][1]
+
+
+def test_category_parameters_are_read_with_their_value_ids(tmp_path: Path) -> None:
+    adapter = tme(tmp_path, HttpResponse(200, PARAMETERS_RESPONSE))
+
+    (parameter,) = adapter.category_parameters("112610")
+
+    assert parameter.parameter_id == "2"
+    assert parameter.name == "Vin max"
+    assert [v.value_id for v in parameter.values] == ["156", "179", "180"]
+
+
+def test_the_category_tree_is_flattened_with_paths(tmp_path: Path) -> None:
+    tree = json.dumps(
+        {
+            "status": "OK",
+            "data": {
+                "elements": {
+                    "id": 63,
+                    "name": "Sound Sources",
+                    "products_count": 436,
+                    "children": [
+                        {"id": 100207, "name": "Speakers", "products_count": 197, "children": []}
+                    ],
+                }
+            },
+        }
+    )
+    adapter = tme(tmp_path, HttpResponse(200, tree))
+
+    categories = adapter.categories()
+
+    assert {c["path"] for c in categories} == {"Sound Sources", "Sound Sources/Speakers"}
+    assert next(c for c in categories if c["name"] == "Speakers")["id"] == "100207"
 
 
 # ---------------------------------------------------------------------------
