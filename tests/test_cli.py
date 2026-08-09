@@ -49,7 +49,41 @@ def test_klm_home_wins_over_xdg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 def test_xdg_is_used_when_klm_home_is_unset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The POSIX branch. `sys.platform` is patched so it runs on Windows too.
+
+    The alternative — skipping this on Windows and its sibling on Linux — means
+    each branch is only ever exercised on one machine, which is how a platform
+    path rots. `resolve_home` reads `sys.platform` at call time, so both are
+    reachable from anywhere.
+    """
+    monkeypatch.setattr("klm.store.paths.sys.platform", "linux")
     monkeypatch.delenv("KLM_HOME", raising=False)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    assert resolve_home() == (tmp_path / "xdg").resolve() / "klm"
+
+
+def test_appdata_wins_on_windows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`%APPDATA%` outranks `XDG_DATA_HOME` on Windows, and is meant to.
+
+    XDG is a freedesktop convention; a Windows user who happens to have the
+    variable set — WSL, a stray dotfile, a shell that exports it — expects their
+    catalog in `AppData\\Roaming`, not in a Unix-shaped path.
+    """
+    monkeypatch.setattr("klm.store.paths.sys.platform", "win32")
+    monkeypatch.delenv("KLM_HOME", raising=False)
+    monkeypatch.setenv("APPDATA", str(tmp_path / "appdata"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+    assert resolve_home() == (tmp_path / "appdata").resolve() / "klm"
+
+
+def test_windows_without_appdata_falls_through(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unset `%APPDATA%` must not strand the catalog — it falls through."""
+    monkeypatch.setattr("klm.store.paths.sys.platform", "win32")
+    monkeypatch.delenv("KLM_HOME", raising=False)
+    monkeypatch.delenv("APPDATA", raising=False)
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
     assert resolve_home() == (tmp_path / "xdg").resolve() / "klm"
 
