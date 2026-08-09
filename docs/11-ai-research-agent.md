@@ -52,7 +52,7 @@ Defined with strict JSON schemas and executed by klm, never by the model.
 | Tool | Purpose | Notes |
 |---|---|---|
 | `catalog_search` | Search the *existing* catalog first | Deliberately first in the list; reuse beats acquisition |
-| `supplier_search` | Parametric/keyword search at TME and LCSC | Returns offers with stock and price |
+| `supplier_search` | Parametric/keyword search at **TME** | Returns offers with stock and price. Not LCSC — see below |
 | `supplier_get_offer` | Details for one supplier part number | |
 | `datasheet_fetch` | Download and cache a datasheet PDF | Returns a document handle, not raw text |
 | `datasheet_extract` | Pull parameters from a cached datasheet | Must return page number + quoted snippet per parameter |
@@ -62,12 +62,63 @@ Defined with strict JSON schemas and executed by klm, never by the model.
 Notably absent: any tool that writes to the catalog, edits a file, or spends money. The agent
 physically cannot do those things — that's an architectural guarantee, not a prompt instruction.
 
+### `supplier_search` is TME-only, and never sees an ID
+
+Two findings from [Q10](14-open-questions.md#q10--parametric-search-quality-at-tme-and-lcsc--resolved-2026-08-09)
+shape this tool, and both are load-bearing.
+
+**LCSC is not searchable by klm at all.** Not a quality judgement —
+[ADR-0009](adr/0009-lcsc-manual-first.md): the official API is granted per company and its terms
+forbid klm's authors from holding the documentation. So the agent searches TME, and LCSC offers
+reach the catalog the way they always have, by a human typing a part number. A candidate the agent
+proposes may therefore be TME-only; the review screen says so rather than implying LCSC was checked
+and came back empty.
+
+**TME's parametric search filters by numeric IDs**: *parameter 2 has value 156 or 179*, not
+"Vin_max ≥ 18 V". Values are discrete identifiers, so a numeric constraint is not a comparison the
+API can express — it is the set of value IDs whose parsed number satisfies it.
+
+klm does that translation, and the agent never touches an ID:
+
+```
+agent:  supplier_search(category="IC/Power/Regulator/Switching",
+                        constraints={"Vin max": ">=18V", "Iout": ">=1A"})
+klm:    resolve the category to a TME category_id
+        ask TME for the parameters available in it   (scope[]=parameters)
+        parse every candidate value with klm.units   ("18 V" → 18.0)
+        keep the value IDs that satisfy the constraint
+        search with parameters[n][id] / [values][]
+```
+
+The agent states constraints in the units a human would; klm resolves them or reports that it
+cannot. A model asked to supply `parameters[0][id]=2` would eventually supply a plausible wrong
+one, and a wrong parameter ID returns *confidently wrong parts* rather than an error. It is the
+same failure as an invented MPN, and the same answer: make it structurally impossible instead of
+asking the prompt to prevent it.
+
+A constraint klm cannot map — no such parameter in the category, or values it cannot parse — is
+**reported to the agent as unmapped**, not silently dropped. Dropping it would quietly widen the
+search and present the results as if they had been filtered.
+
 ### Reuse-first
 
 `catalog_search` being the first tool, and the system prompt making reuse explicit, matters more
 than it looks. Every avoided new part is one less thing to order, stock, label and maintain. The
 agent is instructed to justify introducing a new part when a catalog part is within tolerance of
 the requirement.
+
+### Prerequisite: the TME adapter's parametric path
+
+`search_parametric` currently sends `{"CategoryId": …, "Parameters": {name: value}}` — a shape that
+matches neither v2's `parameters[n][id]` form nor anything ever verified against v1. It is the one
+request in the supplier layer that was written from assumption, and it is precisely what
+`supplier_search` would stand on.
+
+**It is rebuilt against the v2 endpoints before the agent uses it**, together with the
+`POST /auth/token` bearer flow v2 requires (Q1 addendum — the token expires in 300 seconds, so a
+research session outlives it and must refresh mid-flight). Building the agent on the unverified
+shape first would mean debugging a model and a request shape at the same time, with no way to tell
+which was lying.
 
 ## 4. Implementation
 

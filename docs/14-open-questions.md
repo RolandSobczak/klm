@@ -27,10 +27,29 @@ The original design note was wrong. TME's scheme is request signing:
 - A bad signature returns `E_INVALID_SIGNATURE` and nothing more diagnostic, which is why
   `klm.suppliers.tme.signature_base` is a public pure function with its own tests.
 
-**Still unverified:** the published rate limits, and whether the current v2 API differs from the
-documented scheme above. `developers.tme.eu` puts its reference behind a login, so confirming
-either needs an account. klm's rate limiter defaults conservatively (2 req/s) for that reason, and
-the auth layer is one function deep if v2 turns out to differ.
+**Addendum (2026-08-09), from the Q10 work: v2 differs completely, and it *is* OAuth.**
+
+The reference is behind a login as a *page*, but the site embeds its OpenAPI document, which is
+readable without one ([api-doc.tme.eu/v2](https://api-doc.tme.eu/v2)). What it shows:
+
+- `POST /auth/token` with `grant_type=client_credentials` — or `refresh_token` — returning
+  `{access_token, token_type: "Bearer", expires_in: 300, refresh_token}`. A **five-minute** access
+  token, so a session of any length must refresh mid-flight.
+- REST paths (`/products/search`, `/products/data`, `/products/parameters`,
+  `/products/categories/tree`, `/products/files`, `/products/similar`, …) in place of v1's
+  `Products/Action` calls, with a bearer header instead of a signed parameter.
+
+So the original note's "OAuth 2.0" claim was not wrong about TME — it was **early**. It described
+what v2 does, and v1, which klm implements, is what does not.
+
+Both APIs answer today and nothing is broken. But TME's own repository calls the version klm
+targets *deprecated*, and the signing scheme this entry documents does not exist in v2. Rate limits
+remain unpublished either way; the conservative 2 req/s default stands.
+
+**What this costs when v1 goes:** authentication is one function deep as designed, so that part is
+cheap. The endpoint shapes are not — `_call`'s `Action` convention, the `SymbolList` batching and
+every response key would move. Worth doing deliberately, ahead of an outage, rather than the day
+v1 stops answering.
 
 ---
 
@@ -238,21 +257,58 @@ expected.
 
 ---
 
-## Q10 — Parametric search quality at TME and LCSC
+## Q10 — Parametric search quality at TME and LCSC — **RESOLVED** (2026-08-09)
 
-**Blocks:** Phase 9 (agent quality)
+**Blocked:** Phase 9 · **Answer:** TME's is good, LCSC has none klm may use, and the shape of
+TME's changes how the agent has to ask.
 
-The research agent's usefulness depends on how good the suppliers' parametric search actually is.
-If parametric filtering is weak or inconsistently populated, the agent falls back to keyword
-search plus datasheet reading — which works but is slower and more expensive per session.
+Read out of the OpenAPI specification the TME v2 documentation embeds
+([api-doc.tme.eu/v2](https://api-doc.tme.eu/v2)), which needs no login once you fetch the document
+rather than the page.
 
-**To verify:** field coverage and consistency for the categories that matter (regulators, MCUs,
-passives) in each supplier's API.
+**TME: strong, and structured.** `GET /products/search` takes
 
-**If wrong:** an interesting mitigation the architecture already permits — use DigiKey's or
-Mouser's official API purely as a *parametric search index* (they're excellent at it) and then
-resolve the resulting MPNs to TME/LCSC offers for actual purchase. Free, legitimate, and it
-sidesteps the weakness entirely.
+- `category_id` — the category tree is browsable via `/products/categories/tree`;
+- `parameters[n][id]` with one or more `parameters[n][values][]` — real parametric filtering,
+  several groups combinable;
+- `scope[]` ∈ `products | parameters | counters` — asking for `parameters` returns the filters
+  *available for this result set*, which is the discovery mechanism;
+- `filter[in_stock]`, `filter[orderable_stock]`, `sort`, and pagination.
+
+There is also `GET /products/parameters?symbols[]=…` for the parameters of specific products.
+
+**The catch, and it is the design-shaping part: filtering is by numeric IDs, not by names or
+values.** A filter is *parameter id 2 has value id 156 or 179* — not "Vin_max ≥ 18 V". Values are
+discrete identifiers, so a numeric constraint is not a comparison the API can express; it is a
+*set of value IDs whose parsed number satisfies it*.
+
+That is a mechanical translation, and klm already owns every piece of it — `klm.units.parse_value`
+turns `"18V"` into a number, and `scope[]=parameters` supplies the candidate values with their IDs.
+So **klm resolves constraints to IDs; the agent never sees an ID and is never asked to guess one.**
+An agent inventing a plausible parameter ID is the same failure as an invented MPN, and this design
+makes it impossible rather than discouraged.
+
+**LCSC: nothing, and not for quality reasons.** [ADR-0009](adr/0009-lcsc-manual-first.md) already
+settled it — the official API is granted per company and its terms forbid klm's authors from even
+holding the documentation. So there is no LCSC search at any quality level. `supplier_search` is
+**TME-only**, and doc 11 saying "TME and LCSC" was wrong.
+
+**The mitigation is not needed.** Using DigiKey's or Mouser's API as a parametric index was the
+planned fallback for a weak TME. TME is not weak, so klm takes on no third supplier, no fourth
+credential and no MPN-resolution step that could mismatch.
+
+**One consequence outside Phase 9, and it is a live risk.** The v2 API authenticates with
+`POST /auth/token`, `grant_type=client_credentials`, returning a **Bearer token that expires in
+300 seconds** with a refresh token. klm's adapter implements the **v1** HMAC-SHA1 signature scheme
+(Q1) against `Products/Search` and friends. Both exist today, but v1 is the one TME's own repository
+calls deprecated. Two things follow:
+
+- klm's `search_parametric` sends `{"CategoryId": …, "Parameters": {name: value}}` — a shape that
+  matches neither v2's `parameters[n][id]` nor anything verified against v1. It is the one method in
+  the supplier layer whose request shape was never confirmed, and it is exactly what the agent's
+  most important tool would sit on. **It has to be rebuilt against v2 before the agent uses it.**
+- Q1's answer stays true of v1 and is now *incomplete*: it noted "whether the v2 API differs" as
+  unverified. It differs completely. See the addendum under Q1.
 
 ---
 

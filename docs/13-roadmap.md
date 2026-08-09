@@ -245,6 +245,16 @@ earlier would mean building UI against APIs that don't exist yet.*
 
 *Goal: finding a part stops being the bottleneck.*
 
+**Q10 was verified first, and moved the starting line.** TME's parametric search is good but keyed
+by numeric parameter and value IDs, LCSC has none klm may use, and `search_parametric`'s request
+shape was never verified against either API version. So the phase begins in the supplier layer, not
+the agent:
+
+- **0. TME v2 parametric search** — the `/auth/token` bearer flow, `/products/categories/tree`,
+  `scope[]=parameters` discovery, and constraint→value-ID resolution through `klm.units`. Nothing
+  above it can be trusted until this is real, and building the agent on the guessed shape would
+  mean debugging a model and a request at the same time.
+
 - Requirement schema and builder
 - Tool definitions with strict schemas
 - Research agent on the Anthropic tool runner

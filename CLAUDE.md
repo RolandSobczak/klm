@@ -13,7 +13,7 @@ library sync (`klm vendor` / `unvendor`, the lock file, `klm sync status|pull|pu
 `klm promote`), fabrication output (`klm bom`, `klm fab`, preflight, fab profiles, the rotation
 correction table and `klm fab feedback`), and repository scaffolding and CI (`klm verify
 --clean-room`, `klm scaffold`, `klm docs`, `klm report`, timestamp normalisation), and ordering and
-inventory (`klm order plan|export|mark-placed|receive|pin`, `klm stock *`, `klm labels *`). **Q1, Q2, Q3 and Q11 are resolved; Q4 was checked and is
+inventory (`klm order plan|export|mark-placed|receive|pin`, `klm stock *`, `klm labels *`). **Q1, Q2, Q3, Q10 and Q11 are resolved; Q4 was checked and is
 still open, but no longer blocks anything shipped.** **Q8 is resolved too.** Phase 8 (the desktop
 app) is complete: the API, the job model, eight screens, an SVG renderer for symbols and
 footprints, and the sync diff. Phase 9 (the AI research agent) is next.
@@ -215,8 +215,21 @@ These are the things that will bite an implementer who hasn't read the docs.
 
 ## Before building anything
 
-`docs/14-open-questions.md` is the risk register. Q1, Q2, Q3 and Q11 are resolved (2026-08-09).
-Q4–Q10 and Q12 remain; none blocks Phase 7.
+`docs/14-open-questions.md` is the risk register. Q1, Q2, Q3, Q8, Q10 and Q11 are resolved
+(2026-08-09). Q4–Q7, Q9 and Q12 remain; none blocks Phase 9.
+
+- **Q10 — resolved, and it changed Phase 9.** TME v2 has real parametric search
+  (`/products/search` with `parameters[n][id]` + `values[]`, `scope[]=parameters` for discovery),
+  but it filters by **numeric parameter and value IDs**, not names or comparisons. So klm resolves
+  a human constraint to IDs and **the agent never sees one** — a wrong parameter ID returns
+  confidently wrong parts rather than an error, which is the invented-MPN failure again. LCSC has
+  no search klm may use at all (ADR-0009), so `supplier_search` is TME-only. The DigiKey/Mouser
+  parametric-index fallback is dropped: it was for a weak TME, and TME is not weak.
+- **TME v1 vs v2 — a live risk, found while answering Q10.** klm implements v1 (HMAC-SHA1
+  signature, `Products/Action`). v2 is OAuth2 `client_credentials` with a **300-second** bearer
+  token and REST paths. Both answer today; TME calls v1 deprecated. `search_parametric`'s request
+  shape was never verified against either and must be rebuilt on v2 *before* the agent stands on
+  it. See the Q1 addendum.
 
 - **Q1 — resolved.** TME's auth is signature-based, not OAuth: HMAC-SHA1 over
   `POST&<enc URL>&<enc sorted query>`, base64, sent as `ApiSignature`. Still unverified: published
