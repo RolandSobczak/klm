@@ -30,11 +30,14 @@ from typing import Any, Protocol
 
 __all__ = [
     "DEFAULT_MODEL",
+    "EXTRACTION_MODEL",
     "AnthropicClient",
+    "Citation",
     "LlmError",
     "LlmUnavailable",
     "ModelClient",
     "Reply",
+    "Segment",
     "ToolCall",
     "Usage",
 ]
@@ -47,6 +50,10 @@ DEFAULT_MODEL = "claude-opus-5"
 #: Adaptive thinking at high effort. Thinking is on by default on this model;
 #: stating it is documentation rather than configuration.
 DEFAULT_EFFORT = "high"
+
+#: Pulling a parameter table out of a datasheet is narrow, mechanical, and
+#: done a lot — the case the small model is for (docs/11 §4).
+EXTRACTION_MODEL = "claude-haiku-4-5"
 
 DEFAULT_MAX_TOKENS = 16000
 
@@ -96,11 +103,50 @@ class ToolCall:
 
 
 @dataclass(frozen=True)
+class Citation:
+    """Where a claim came from, according to the API.
+
+    Produced by the API's own citation machinery when a document block is sent
+    with `citations: {enabled: true}` — `quote` is lifted from the document,
+    not written by the model. That distinction is the whole reason klm uses
+    citations for datasheet extraction rather than asking for a quotation: a
+    model asked to quote can paraphrase, and a paraphrase that looks like a
+    quote is indistinguishable from provenance.
+    """
+
+    quote: str
+    start_page: int | None = None
+    end_page: int | None = None
+    title: str | None = None
+
+    @property
+    def page(self) -> int | None:
+        return self.start_page
+
+    def __str__(self) -> str:
+        where = f"p.{self.start_page}" if self.start_page else "no page"
+        if self.end_page and self.end_page != self.start_page:
+            where = f"pp.{self.start_page}-{self.end_page}"
+        return f'{where}: "{self.quote.strip()}"'
+
+
+@dataclass(frozen=True)
+class Segment:
+    """One text block, with whatever it was cited from."""
+
+    text: str
+    citations: tuple[Citation, ...] = ()
+
+
+@dataclass(frozen=True)
 class Reply:
     """One turn from the model."""
 
     text: str
     tool_calls: tuple[ToolCall, ...] = ()
+    segments: tuple[Segment, ...] = ()
+    """Text blocks with their citations. The research loop ignores these;
+    datasheet extraction is built on them."""
     stop_reason: str = "end_turn"
     usage: Usage = field(default_factory=Usage)
     content: Any = None
@@ -205,11 +251,14 @@ def _translate(exc: Exception) -> LlmError:
 def _read(message: Any) -> Reply:
     """Read the SDK's message into klm's :class:`Reply`."""
     texts: list[str] = []
+    segments: list[Segment] = []
     calls: list[ToolCall] = []
     for block in getattr(message, "content", None) or []:
         kind = getattr(block, "type", None)
         if kind == "text":
-            texts.append(str(getattr(block, "text", "")))
+            text = str(getattr(block, "text", ""))
+            texts.append(text)
+            segments.append(Segment(text, _citations(block)))
         elif kind == "tool_use":
             calls.append(
                 ToolCall(
@@ -229,10 +278,43 @@ def _read(message: Any) -> Reply:
     return Reply(
         text="\n".join(t for t in texts if t).strip(),
         tool_calls=tuple(calls),
+        segments=tuple(segments),
         stop_reason=str(getattr(message, "stop_reason", "") or "end_turn"),
         usage=usage,
         content=getattr(message, "content", None),
     )
+
+
+def _citations(block: Any) -> tuple[Citation, ...]:
+    """Read a text block's citations, whatever location type they carry.
+
+    A PDF cites by page, plain text by character offset. Only the page form
+    means anything to a person reading a datasheet, so a character-located
+    citation keeps its quote and reports no page rather than inventing one.
+    """
+    found: list[Citation] = []
+    for item in getattr(block, "citations", None) or []:
+        quote = str(getattr(item, "cited_text", "") or "").strip()
+        if not quote:
+            continue
+        found.append(
+            Citation(
+                quote=quote,
+                start_page=_optional_int(getattr(item, "start_page_number", None)),
+                end_page=_optional_int(getattr(item, "end_page_number", None)),
+                title=getattr(item, "document_title", None),
+            )
+        )
+    return tuple(found)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _int(value: Any) -> int:

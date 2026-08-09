@@ -19,8 +19,9 @@ app) is complete: the API, the job model, eight screens, an SVG renderer for sym
 footprints, and the sync diff. **Phase 9 is under way**: the TME v2 migration and constraint→ID
 resolution are done, and so is the requirement schema (`klm.research.requirement`, `klm research
 check`), the first four agent tools (`klm.research.tools`, `klm research tools`), and the research
-loop itself (`klm.llm.client`, `klm.research.agent`, `klm research run`). Next: the datasheet cache
-and cited extraction, then the proposal queue and review UI.
+loop itself (`klm.llm.client`, `klm.research.agent`, `klm research run`), and the datasheet cache
+with cited extraction (`klm.services.datasheets`, `klm datasheet fetch|extract`). Next: the
+proposal queue and review UI, then datasheet Q&A and substitute finding.
 
 - `README.md` — entry point and documentation map
 - `docs/01`–`docs/15` — the design, one concern per document
@@ -127,6 +128,14 @@ These are the things that will bite an implementer who hasn't read the docs.
 - **Preference scores are relative to the candidate set**, and a preference a candidate is silent
   about is dropped from its average rather than scored zero — scoring it zero punishes a part for
   a field klm never fetched. Ranking a single candidate is meaningless by construction.
+- **A datasheet quote comes from the API's citation machinery, never from the model.** The PDF
+  goes up as a document block with `citations: {enabled: true}`, so `cited_text` is lifted from
+  the file. A model *asked* to quote can paraphrase, and a paraphrase that looks like a quote is
+  indistinguishable from provenance — which would make the whole guardrail decorative. A value
+  stated in an uncited block is dropped and reported, never returned.
+- **klm does not parse PDFs.** It caches the bytes and lets the API read them. A hand-rolled
+  extractor would work on the simple half of datasheets and produce nonsense on the other half.
+  A URL that comes back as HTML (a login page, a redirect) is reported, not sent as a "document".
 - **klm drives the agent loop; the SDK's tool runner is deliberately not used.** The guardrails
   (iteration cap, token budget, spend ceiling, `event_log`) *are* this phase, the tool set is data
   built per machine rather than decorated functions, and the loop has to be testable against a fake

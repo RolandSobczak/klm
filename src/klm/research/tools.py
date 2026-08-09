@@ -2,15 +2,20 @@
 
 A tool is a name, a strict JSON schema, and a klm function. The model chooses
 *which* to call and with what; **klm executes every one of them** (docs/11 §3).
-That sentence is the design: the agent's reach is the union of these four
-functions, and nothing here writes.
+That sentence is the design: the agent's reach is the union of these functions,
+and nothing here changes anything a human would miss.
 
 What is absent is as deliberate as what is present:
 
 * **No tool writes to the catalog.** Not "the prompt says not to" — there is no
   such function, and the connection these tools hold is opened `mode=ro`, so a
   write fails in SQLite rather than in a code review (docs/adr/0006).
-* **No tool spends money, edits a file, or touches a project.**
+* **No tool edits a project or places an order.** `datasheet_fetch` is the one
+  tool that touches the filesystem, and it writes a downloaded PDF into a
+  cache directory — regenerable, outside the catalog, and deleting it costs a
+  re-download.
+* **`datasheet_extract` spends money**, since reading a PDF is a model call. It
+  is the only tool that does, and the session's spend ceiling covers it.
 * **`supplier_search` is TME-only.** Not a quality judgement: klm may not hold
   LCSC's API documentation at all (ADR-0009), so LCSC offers reach the catalog
   by a human typing a part number. A candidate the agent proposes may be
@@ -44,12 +49,15 @@ import json
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from klm.assets.kicad_libs import KicadLibraries
+from klm.llm.client import ModelClient
 from klm.model import Offer, Part, PartStatus
 from klm.services.assets import footprint_availability
 from klm.services.catalog import CatalogError, search_parts
+from klm.services.datasheets import BinaryTransport, DatasheetError, extract, fetch, load
 from klm.store.assets import AssetError, AssetStore
 from klm.suppliers.base import SearchHit, SupplierAdapter, SupplierError
 from klm.units import UnitError, ValueParseError
@@ -169,6 +177,13 @@ class ResearchContext:
     store: AssetStore | None = None
     adapters: Mapping[str, SupplierAdapter] = field(default_factory=dict)
     libs: KicadLibraries | None = None
+    datasheet_cache: Path | None = None
+    """Where fetched PDFs live. Absent means no datasheet tools."""
+    reader: ModelClient | None = None
+    """The model that reads datasheets — a small one; the task is narrow and
+    done a lot. Absent means `datasheet_fetch` without `datasheet_extract`:
+    the agent can still find and cache a datasheet for a human to open."""
+    fetcher: BinaryTransport | None = None
 
 
 @dataclass(frozen=True)
@@ -207,6 +222,7 @@ class Toolset:
             SupplierError,
             CatalogError,
             AssetError,
+            DatasheetError,
             ValueParseError,
             UnitError,
             OSError,
@@ -242,6 +258,10 @@ def build_toolset(context: ResearchContext) -> Toolset:
         tools.append(_supplier_search(context))
     if context.adapters:
         tools.append(_supplier_get_offer(context))
+    if context.datasheet_cache is not None:
+        tools.append(_datasheet_fetch(context))
+        if context.reader is not None:
+            tools.append(_datasheet_extract(context))
     return Toolset(tuple(tools))
 
 
@@ -430,6 +450,94 @@ def _footprint_lookup(context: ResearchContext) -> Tool:
                 },
             },
             "required": ["package"],
+            "additionalProperties": False,
+        },
+        run=run,
+    )
+
+
+def _datasheet_fetch(context: ResearchContext) -> Tool:
+    def run(url: str) -> Any:
+        assert context.datasheet_cache is not None
+        datasheet = fetch(url, context.datasheet_cache, transport=context.fetcher)
+        return {
+            "handle": datasheet.sha,
+            "bytes": datasheet.size,
+            "note": "cached; read it with datasheet_extract",
+        }
+
+    return Tool(
+        name="datasheet_fetch",
+        description=(
+            "Download and cache a datasheet PDF, and return a handle to it. The handle is the "
+            "hash of the file — pass it to datasheet_extract; you cannot construct one. A URL "
+            "that turns out not to be a PDF (a login page, a redirect to a product page) is "
+            "reported as such rather than read."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "A datasheet URL from a search result or an offer.",
+                }
+            },
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+        run=run,
+    )
+
+
+def _datasheet_extract(context: ResearchContext) -> Tool:
+    def run(handle: str, parameters: list[str]) -> Any:
+        assert context.datasheet_cache is not None and context.reader is not None
+        datasheet = load(handle, context.datasheet_cache)
+        if datasheet is None:
+            return {"error": f"no cached datasheet {handle!r}; fetch it first"}
+
+        result = extract(datasheet, parameters, context.reader)
+        return {
+            "parameters": [
+                {
+                    "name": item.name,
+                    "value": item.value,
+                    "page": item.page,
+                    "quote": item.citations[0].quote,
+                }
+                for item in result.parameters
+            ],
+            "dropped_uncited": [
+                {"name": name, "value": value} for name, value in result.uncited
+            ],
+            "not_stated": result.missing,
+            "warning": (
+                "Values with no citation in the datasheet were dropped — do not use them."
+                if result.uncited
+                else None
+            ),
+            "note": result.note or None,
+        }
+
+    return Tool(
+        name="datasheet_extract",
+        description=(
+            "Read parameters out of a cached datasheet. Every value comes back with the page and "
+            "the passage it was quoted from; a value the datasheet does not actually state is "
+            "dropped rather than returned, and appears under dropped_uncited. Ask for the "
+            "parameters you need by name, in the requirement's own words."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "handle": {"type": "string", "description": "From datasheet_fetch."},
+                "parameters": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "e.g. ['Vin range', 'Iout max', 'Iq'].",
+                },
+            },
+            "required": ["handle", "parameters"],
             "additionalProperties": False,
         },
         run=run,

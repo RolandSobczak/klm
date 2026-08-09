@@ -96,6 +96,8 @@ AGENT
 ✓ klm research tools [--format json]   What the agent could do on this machine
 ✓ klm research run <FILE> [--max-spend USD] [--effort …] [--quiet]
 ○ klm research review                  Work the proposal queue
+✓ klm datasheet fetch <URL_OR_PART> [--refresh]
+✓ klm datasheet extract <URL_OR_PART> --parameter NAME …  page + quote, or dropped
 ○ klm ask <klm_id> "<question>"        Datasheet Q&A
 
 COST

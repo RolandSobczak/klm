@@ -429,6 +429,25 @@ def _add_research_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParse
     run.add_argument("--quiet", action="store_true", help="Don't stream the answer as it arrives.")
     run.set_defaults(func=cmd_research_run)
 
+    sheet = sub.add_parser("datasheet", help="Fetch a datasheet, or read parameters out of one.")
+    sheet_actions = sheet.add_subparsers(dest="action", metavar="ACTION", required=True)
+
+    getting = sheet_actions.add_parser("fetch", help="Download and cache a datasheet PDF.")
+    getting.add_argument("target", metavar="URL_OR_PART")
+    getting.add_argument("--refresh", action="store_true", help="Ignore the cached copy.")
+    getting.set_defaults(func=cmd_datasheet_fetch)
+
+    reading = sheet_actions.add_parser(
+        "extract", help="Read parameters out of a datasheet, with the page and the quote."
+    )
+    reading.add_argument("target", metavar="URL_OR_PART")
+    reading.add_argument(
+        "--parameter", metavar="NAME", action="append", default=[], required=True,
+        help="Repeatable. Ask in your own words: --parameter 'Vin max'.",
+    )
+    reading.add_argument("--format", choices=("text", "json"), default="text")
+    reading.set_defaults(func=cmd_datasheet_extract)
+
 
 def _add_repo_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     verify = sub.add_parser("verify", help="Prove a project opens for somebody else.")
@@ -3014,7 +3033,7 @@ def cmd_research_run(args: argparse.Namespace) -> int:
     event log gets a writable one. klm records what the agent did; the agent
     cannot record anything (docs/adr/0006).
     """
-    from klm.llm.client import AnthropicClient, LlmUnavailable
+    from klm.llm.client import EXTRACTION_MODEL, AnthropicClient, LlmUnavailable
     from klm.research.agent import Limits, Step, research
     from klm.research.requirement import RequirementError, load_requirement
     from klm.research.tools import ResearchContext, build_toolset
@@ -3046,7 +3065,15 @@ def cmd_research_run(args: argparse.Namespace) -> int:
     writing = connect(paths.db, create=False)
     try:
         toolset = build_toolset(
-            ResearchContext(conn=reading, store=AssetStore(paths.assets), adapters=adapters)
+            ResearchContext(
+                conn=reading,
+                store=AssetStore(paths.assets),
+                adapters=adapters,
+                datasheet_cache=paths.datasheet_cache,
+                # A small model for reading PDFs: narrow, mechanical, and done
+                # a lot. Its spend counts against the same session ceiling.
+                reader=AnthropicClient(model=EXTRACTION_MODEL, max_tokens=4000),
+            )
         )
         print(f"{_INFO} {requirement.kind}: {len(toolset.tools)} tool(s), "
               f"ceiling ${args.max_spend:.2f}")
@@ -3082,6 +3109,105 @@ def cmd_research_run(args: argparse.Namespace) -> int:
         return EXIT_CHECK_FAILED
     print(f"{_INFO} nothing was written to the catalog; this is a proposal")
     return EXIT_OK
+
+
+def _datasheet_url(args: argparse.Namespace, paths: Paths) -> tuple[str | None, str | None]:
+    """`(url, title)` for a URL, or for a part that carries one.
+
+    A part with no datasheet URL is a checked condition, not a klm error —
+    the answer is "this part has none", which the caller reports and exits 1.
+    """
+    target = args.target
+    if target.lower().startswith(("http://", "https://")):
+        return target, None
+    conn = connect(paths.db, create=False)
+    try:
+        part = _resolve_part(conn, target)
+        if not part.datasheet_url:
+            print(f"{_FAIL} {part.mpn} has no datasheet URL — set one, or pass a URL")
+            return None, None
+        return part.datasheet_url, part.mpn
+    finally:
+        conn.close()
+
+
+def cmd_datasheet_fetch(args: argparse.Namespace) -> int:
+    from klm.services.datasheets import DatasheetError, fetch
+
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    url, _ = _datasheet_url(args, paths)
+    if url is None:
+        return EXIT_CHECK_FAILED
+
+    try:
+        datasheet = fetch(url, paths.datasheet_cache, refresh=args.refresh)
+    except DatasheetError as exc:
+        print(f"{_FAIL} {exc}")
+        return EXIT_CHECK_FAILED
+
+    print(f"{_OK} {datasheet.sha}  {datasheet.size / 1000:.0f} kB")
+    print(f"      {datasheet.path}")
+    return EXIT_OK
+
+
+def cmd_datasheet_extract(args: argparse.Namespace) -> int:
+    """Read parameters out of a datasheet — with the page and the quote.
+
+    The same code path the agent's `datasheet_extract` tool uses, so a human
+    can check what the agent would be told before trusting a proposal built on
+    it. A parameter the datasheet does not actually state is *reported as
+    dropped*, never returned as a value.
+    """
+    from klm.llm.client import EXTRACTION_MODEL, AnthropicClient, LlmUnavailable
+    from klm.services.datasheets import DatasheetError, extract, fetch
+
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    url, title = _datasheet_url(args, paths)
+    if url is None:
+        return EXIT_CHECK_FAILED
+
+    try:
+        client = AnthropicClient(model=EXTRACTION_MODEL, max_tokens=4000)
+    except LlmUnavailable as exc:
+        print(f"{_FAIL} {exc}")
+        return EXIT_CHECK_FAILED
+
+    try:
+        datasheet = fetch(url, paths.datasheet_cache)
+    except DatasheetError as exc:
+        print(f"{_FAIL} {exc}")
+        return EXIT_CHECK_FAILED
+
+    result = extract(datasheet, args.parameter, client, title=title)
+
+    if args.format == "json":
+        print(json.dumps({
+            "datasheet": datasheet.sha,
+            "parameters": [
+                {
+                    "name": p.name,
+                    "value": p.value,
+                    "page": p.page,
+                    "quote": p.citations[0].quote,
+                }
+                for p in result.parameters
+            ],
+            "dropped_uncited": [{"name": n, "value": v} for n, v in result.uncited],
+            "not_stated": result.missing,
+        }, indent=2))
+        return EXIT_OK if result.parameters else EXIT_CHECK_FAILED
+
+    for parameter in result.parameters:
+        print(f"{_OK} {parameter}")
+    for name, value in result.uncited:
+        print(f"{_WARN} {name} = {value} — nothing cited for it, dropped")
+    for name in result.missing:
+        print(f"{_INFO} {name}: the datasheet does not state it")
+    if result.note:
+        print(f"{_WARN} {result.note}")
+    return EXIT_OK if result.parameters else EXIT_CHECK_FAILED
 
 
 # ---------------------------------------------------------------------------

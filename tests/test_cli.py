@@ -1192,3 +1192,43 @@ def test_research_run_checks_the_requirement_before_spending_anything(
     out = capsys.readouterr().out
     assert "unknown section 'constrains'" in out
     assert "klm[agent]" not in out, "the file is read before a model is built"
+
+
+def test_datasheet_fetch_caches_a_pdf(home: Path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    import klm.services.datasheets as datasheets
+
+    assert main(["init"]) == EXIT_OK
+    monkeypatch.setattr(datasheets, "urllib_bytes", lambda url, timeout: b"%PDF-1.7\nx\n%%EOF")
+
+    assert main(["datasheet", "fetch", "https://example.test/a.pdf"]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "sha256:" in out
+
+
+def test_datasheet_fetch_reports_a_page_that_is_not_a_pdf(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    import klm.services.datasheets as datasheets
+
+    assert main(["init"]) == EXIT_OK
+    monkeypatch.setattr(datasheets, "urllib_bytes", lambda url, timeout: b"<html>login</html>")
+
+    assert main(["datasheet", "fetch", "https://example.test/a.pdf"]) == EXIT_CHECK_FAILED
+    assert "not a PDF" in capsys.readouterr().out
+
+
+def test_datasheet_extract_needs_a_part_with_a_datasheet(home: Path, capsys) -> None:
+    """A part with no datasheet URL is an answer, not a klm error."""
+    assert main(["init"]) == EXIT_OK
+    paths = Paths.resolve(None)
+    conn = connect(paths.db, create=False)
+    try:
+        seed_resistor(AssetStore(paths.assets), conn, datasheet_url=None)
+    finally:
+        conn.close()
+
+    code = main(["datasheet", "extract", "RC0402FR-074K7L", "--parameter", "Vin max"])
+
+    assert code == EXIT_CHECK_FAILED
+    assert "no datasheet URL" in capsys.readouterr().out

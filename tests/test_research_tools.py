@@ -367,3 +367,114 @@ def test_a_package_klm_has_never_heard_of_is_not_invented(toolset: Toolset) -> N
 )
 def test_the_validator_covers_the_schemas_klm_writes(schema, value, ok) -> None:
     assert (validate_arguments(schema, value) == []) is ok
+
+
+# ---------------------------------------------------------------------------
+# datasheet_fetch / datasheet_extract
+# ---------------------------------------------------------------------------
+
+
+PDF = b"%PDF-1.7\nfake\n%%EOF"
+
+
+class FakeReader:
+    model = "fake-reader"
+
+    def __init__(self, *segments) -> None:  # type: ignore[no-untyped-def]
+        self.segments = segments
+
+    def reply(self, *, system, messages, tools, on_text=None):  # type: ignore[no-untyped-def]
+        from klm.llm.client import Reply
+
+        return Reply(text="", segments=self.segments)
+
+
+def transport(url: str, timeout: float) -> bytes:
+    return PDF
+
+
+def test_the_datasheet_tools_are_absent_without_a_cache(env) -> None:  # type: ignore[no-untyped-def]
+    _, conn, store = env
+    tools = build_toolset(ResearchContext(conn=conn, store=store))
+    assert tools.get("datasheet_fetch") is None
+
+
+def test_without_a_reader_a_datasheet_can_be_fetched_but_not_read(env, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """Caching it for a human to open is still worth something."""
+    _, conn, store = env
+    tools = build_toolset(
+        ResearchContext(conn=conn, store=store, datasheet_cache=tmp_path, fetcher=transport)
+    )
+    assert tools.get("datasheet_fetch") is not None
+    assert tools.get("datasheet_extract") is None
+
+
+def test_a_fetched_datasheet_returns_a_handle_the_model_could_not_invent(env, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    _, conn, store = env
+    tools = build_toolset(
+        ResearchContext(conn=conn, store=store, datasheet_cache=tmp_path, fetcher=transport)
+    )
+
+    payload = call(tools, "datasheet_fetch", url="https://example.test/a.pdf")
+
+    assert payload["handle"].startswith("sha256:")
+    assert payload["bytes"] == len(PDF)
+
+
+def test_a_url_that_is_not_a_pdf_comes_back_as_a_result(env, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    _, conn, store = env
+    tools = build_toolset(
+        ResearchContext(
+            conn=conn,
+            store=store,
+            datasheet_cache=tmp_path,
+            fetcher=lambda url, timeout: b"<html>login</html>",
+        )
+    )
+
+    payload = call(tools, "datasheet_fetch", url="https://example.test/a.pdf")
+
+    assert "not a PDF" in payload["error"]
+
+
+def test_an_invented_handle_is_refused(env, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    _, conn, store = env
+    tools = build_toolset(
+        ResearchContext(
+            conn=conn,
+            store=store,
+            datasheet_cache=tmp_path,
+            fetcher=transport,
+            reader=FakeReader(),
+        )
+    )
+
+    payload = call(
+        tools, "datasheet_extract", handle="sha256:" + "0" * 64, parameters=["Vin max"]
+    )
+
+    assert "no cached datasheet" in payload["error"]
+
+
+def test_an_uncited_value_never_reaches_the_agent(env, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    from klm.llm.client import Citation, Segment
+
+    _, conn, store = env
+    reader = FakeReader(
+        Segment("Vin max: 6.5 V", (Citation(quote="VIN 1.8 to 6.5 V", start_page=3),)),
+        Segment("Iq: 60 nA"),
+    )
+    tools = build_toolset(
+        ResearchContext(
+            conn=conn, store=store, datasheet_cache=tmp_path, fetcher=transport, reader=reader
+        )
+    )
+    handle = call(tools, "datasheet_fetch", url="https://example.test/a.pdf")["handle"]
+
+    payload = call(tools, "datasheet_extract", handle=handle, parameters=["Vin max", "Iq"])
+
+    assert payload["parameters"] == [
+        {"name": "Vin max", "value": "6.5 V", "page": 3, "quote": "VIN 1.8 to 6.5 V"}
+    ]
+    assert payload["dropped_uncited"] == [{"name": "Iq", "value": "60 nA"}]
+    assert "do not use them" in payload["warning"]

@@ -105,12 +105,11 @@ Defined with strict JSON schemas and executed by klm, never by the model.
 | ✓ `supplier_search` | Parametric/keyword search at **TME** | Returns hits with stock. Not LCSC — see below |
 | ✓ `supplier_get_offer` | Details for one supplier part number | The only source of a price or stock claim |
 | ✓ `footprint_lookup` | Does the catalog already have this package? | Drives the reuse preference |
-| ○ `datasheet_fetch` | Download and cache a datasheet PDF | Returns a document handle, not raw text |
-| ○ `datasheet_extract` | Pull parameters from a cached datasheet | Must return page number + quoted snippet per parameter |
+| ✓ `datasheet_fetch` | Download and cache a datasheet PDF | Returns a handle — the file's hash — not raw text |
+| ✓ `datasheet_extract` | Pull parameters from a cached datasheet | Returns page + quote per parameter, and drops anything uncited |
 | ○ `propose_part` | Emit a structured candidate | The only "write" — and it writes to a review queue, not the catalog |
 
-`klm.research.tools`; ✓ is built, ○ arrives with its own phase-9 step (the datasheet cache and
-the proposal queue respectively). `klm research tools` lists what a session would have *on this
+`klm.research.tools`; ✓ is built, ○ arrives with the proposal queue. `klm research tools` lists what a session would have *on this
 machine*, which is worth being able to ask before spending anything.
 
 Notably absent: any tool that writes to the catalog, edits a file, or spends money. The agent
@@ -266,7 +265,7 @@ difference between a clear message and an `IndexError` is that check.
 | Guardrail | Mechanism |
 |---|---|
 | **Cannot write to the catalog** | No tool exists. `propose_part` writes to a review queue. |
-| **Every parameter cited** | `datasheet_extract` must return page + quote; parameters without provenance are rejected at the schema level |
+| **Every parameter cited** | `datasheet_extract` returns page + quote, **and the quote comes from the API's citation machinery rather than from the model**. A parameter stated in an uncited block is dropped and reported, never returned as a value |
 | **Conflicts surfaced, not resolved** | When a datasheet and a supplier field disagree, both are recorded and the candidate is flagged for review |
 | **Stock and lifecycle verified** | Claims about availability come from a live offer, never from the model's recollection |
 | **No invented part numbers** | Every proposed MPN must be traceable to a supplier search result. Unbacked MPNs are dropped before review |
