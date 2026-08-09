@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "klm"
-version = "0.1.0.dev0"
+dynamic = ["version"]
 description = "KiCad Library Manager — parts, libraries, sourcing and fabrication for KiCad projects"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -47,6 +47,13 @@ klm = "klm.cli.main:main"
 
 [project.urls]
 Repository = "https://github.com/RolandSobczak/klm"
+
+# One declaration of the version, read by the build from the package itself.
+# The release workflow stamps the installer from `__init__.py` and the wheel
+# came from here, so two literals would eventually ship an installer and a
+# wheel that disagree about what they are.
+[tool.hatch.version]
+path = "src/klm/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/klm"]
