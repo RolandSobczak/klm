@@ -14,12 +14,15 @@ import os
 import sqlite3
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 from klm import __version__
 from klm.environment import find_kicad_config, probe_all
 from klm.serial.part_file import to_yaml
 from klm.services.catalog import list_parts
 from klm.services.exporter import PART_FILE, export_catalog, import_catalog
+from klm.services.generate import generate
+from klm.services.register import apply_plan, plan_registration
 from klm.store import AssetKind, AssetStore, Paths, connect, migrate
 from klm.store.db import SCHEMA_VERSION, user_version
 
@@ -83,6 +86,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop at the first malformed file instead of collecting errors.",
     )
     importer.set_defaults(func=cmd_import)
+
+    gen = sub.add_parser("generate", help="Rebuild the KiCad libraries from the catalog.")
+    gen.set_defaults(func=cmd_generate)
+
+    reg = sub.add_parser("register", help="Register klm's libraries with KiCad.")
+    reg.add_argument(
+        "--check",
+        action="store_true",
+        help="Report what is missing without writing; non-zero if anything is.",
+    )
+    reg.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the exact changes that would be made, then stop.",
+    )
+    reg.add_argument(
+        "--kicad-config",
+        metavar="DIR",
+        help="KiCad configuration directory (default: the newest one found).",
+    )
+    reg.set_defaults(func=cmd_register)
 
     return parser
 
@@ -354,6 +378,80 @@ def cmd_import(args: argparse.Namespace) -> int:
             print(f"    {message}")
         print(f"\n{len(result.errors)} file(s) could not be imported.")
         return EXIT_CHECK_FAILED
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# generate / register
+# ---------------------------------------------------------------------------
+
+
+def cmd_generate(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+
+    conn = connect(paths.db, create=False)
+    try:
+        result = generate(conn, paths)
+    finally:
+        conn.close()
+
+    state = "rebuilt" if result.changed else "already up to date"
+    print(
+        f"{_OK} {state}: {result.symbols} symbols, "
+        f"{result.footprints} footprints, {result.models} 3D models"
+    )
+    print(f"    {paths.generated}")
+
+    if result.skipped:
+        print()
+        for klm_id, reason in result.skipped:
+            print(f"{_WARN} skipped {klm_id}: {reason}")
+        print(f"\n{len(result.skipped)} part(s) could not be generated.")
+        return EXIT_CHECK_FAILED
+    return EXIT_OK
+
+
+def cmd_register(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+
+    if args.kicad_config:
+        config_dir = Path(args.kicad_config).expanduser()
+    else:
+        found, _version = find_kicad_config()
+        if found is None:
+            print(f"{_FAIL} no KiCad configuration directory found")
+            print("    → is KiCad installed? Otherwise pass --kicad-config DIR")
+            return EXIT_CHECK_FAILED
+        config_dir = found
+
+    plan = (
+        plan_registration(paths, config_dir)
+        if (args.check or args.dry_run)
+        else apply_plan(paths, config_dir)
+    )
+
+    print(f"KiCad config     {plan.kicad_config}")
+    for item in plan.already_correct:
+        print(f"{_OK} {item}")
+
+    if not plan.needed:
+        print(f"\n{_OK} klm is registered with KiCad")
+        return EXIT_OK
+
+    print()
+    for change in plan.changes:
+        verb = "would" if (args.check or args.dry_run) else "did"
+        print(f"  {verb}: {change.description}")
+        print(f"         in {change.target}")
+
+    if args.check or args.dry_run:
+        print(f"\n{_FAIL} {len(plan.changes)} change(s) needed — run: klm register")
+        return EXIT_CHECK_FAILED
+
+    print(f"\n{_OK} registered ({len(plan.changes)} change(s)); originals kept as *.klm-bak")
+    print(f"{_INFO} restart KiCad for the new libraries to appear")
     return EXIT_OK
 
 
