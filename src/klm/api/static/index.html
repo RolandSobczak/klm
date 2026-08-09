@@ -23,6 +23,7 @@
         <option value="approved">approved</option>
         <option value="deprecated">deprecated</option>
       </select>
+      <button id="add-open">Add part</button>
       <button id="generate">Rebuild libraries</button>
     </div>
     <div class="split">
@@ -30,6 +31,30 @@
       <aside id="detail"><p class="muted">Select a part.</p></aside>
     </div>
   </section>
+
+  <dialog id="add">
+    <form id="add-form" method="dialog">
+      <h2>Add a part</h2>
+      <p class="muted">klm fills what it can find and reports what it cannot.
+        The result is a <strong>draft</strong> — nothing is approved automatically.</p>
+      <label>MPN <input name="mpn" required autofocus placeholder="STM32G031K8T6"></label>
+      <label>Manufacturer <input name="manufacturer" placeholder="left blank if unknown"></label>
+      <label>Category <input name="category" placeholder="IC/Microcontroller"></label>
+      <label>Package <input name="package" placeholder="0402, LQFP-32"></label>
+      <label>Value <input name="value" placeholder="10k, 100nF — passives only"></label>
+      <label>LCSC part <input name="lcsc" placeholder="C8734 — entered by hand, see ADR-0009"></label>
+      <label>Datasheet <input name="datasheet" placeholder="URL of the PDF"></label>
+      <label class="check"><input type="checkbox" name="offline"> Do not contact suppliers</label>
+      <div class="bar">
+        <button value="add" id="add-submit">Add</button>
+        <button value="cancel" formnovalidate>Cancel</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="diff"><div id="diff-body"></div>
+    <div class="bar"><button id="diff-close">Close</button></div>
+  </dialog>
 
   <section id="project" class="view">
     <div class="bar">

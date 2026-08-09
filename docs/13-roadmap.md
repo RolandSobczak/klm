@@ -206,8 +206,8 @@ the space. See [10 §7](10-ordering-and-inventory.md#why-there-is-no-barcode-yet
 *Goal: daily use stops requiring the terminal.*
 
 - FastAPI local API with the job/SSE model
-- Tauri shell
-- Catalog, part detail, add-part wizard
+- Desktop shell
+- Catalog, part detail, add-part
 - Symbol and footprint SVG previews
 - Projects and sync screens with diff preview
 - Order and inventory screens
@@ -222,10 +222,21 @@ pywebview wraps the platform's own webview, ships in the same wheel, and works o
 Linux from `pip install klm[app]`. The cost is a heavier install than a 5 MB signed binary, and a
 Linux box without WebKitGTK falls back to `klm serve`.
 
-Shipped so far: the API with the job/SSE model, and the catalog, project, ordering, inventory and
-health screens. **Not yet built: the add-part wizard, symbol and footprint SVG previews, and the
-side-by-side sync diff** — the three screens that need drawing rather than listing. Everything they
-would call already exists and is tested.
+**Complete.** The API with the job/SSE model, and the catalog, part detail, add-part, project,
+sync-diff, ordering, inventory and health screens. Two things the original list named are
+deliberately *not* here:
+
+- **The 3D preview.** A STEP file is a boundary representation, so drawing one means tessellating
+  it, and a wrong picture of a 3D model is the failure this project refuses everywhere else. The
+  QA gate's bounding-box check catches the real problems; KiCad's viewer is there for the rest.
+- **The fab screen.** `klm fab` shells out to KiCad and takes minutes; wrapping it in a window
+  before anyone has run the CLI version against a board that came back would be guessing at what
+  the screen should say.
+
+Two design decisions the build forced, both recorded in doc 12: the add-part *wizard* collapsed
+into one form and a job log — the steps it would have walked through are things klm does, not
+things it asks about — and the sync diff shows **two** comparisons rather than the obvious
+catalog-versus-vendored one, which is permanently non-empty by design (doc 06 §3).
 
 *Deliberately late. Everything it does already works; this phase makes it pleasant. Building it
 earlier would mean building UI against APIs that don't exist yet.*

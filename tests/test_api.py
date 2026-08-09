@@ -19,7 +19,7 @@ from tests.projects import RESISTOR_ID, make_project, seed_resistor
 
 from klm.api.desktop import HOST, WindowUnavailable, pick_port, run_window
 from klm.api.jobs import JobRunner, JobState
-from klm.services.catalog import get_part
+from klm.services.catalog import get_part, save_part
 
 fastapi = pytest.importorskip("fastapi", reason="the app extra is not installed")
 from fastapi.testclient import TestClient  # noqa: E402
@@ -329,6 +329,130 @@ def _settle(api, job_id: str) -> dict:  # type: ignore[no-untyped-def]
         for _ in stream.iter_text():
             pass
     return dict(api.get(f"/api/jobs/{job_id}").json())
+
+
+# ---------------------------------------------------------------------------
+# Previews
+# ---------------------------------------------------------------------------
+
+
+def test_a_symbol_preview_is_an_svg(client) -> None:
+    api, _paths, _conn = client
+    response = api.get(f"/api/parts/{RESISTOR_ID}/symbol.svg")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("image/svg+xml")
+    assert response.text.startswith("<svg")
+
+
+def test_a_footprint_preview_is_an_svg(client) -> None:
+    api, _paths, _conn = client
+    assert api.get(f"/api/parts/{RESISTOR_ID}/footprint.svg").text.startswith("<svg")
+
+
+def test_a_missing_asset_is_a_404_with_the_reason(client) -> None:
+    """Not a 500: "no footprint yet" is a fact about the catalog, not a fault."""
+    api, _paths, conn = client
+    part = get_part(conn, RESISTOR_ID)
+    assert part is not None
+    part.footprint_hash = None
+    part.updated_at = None
+    save_part(conn, part)
+
+    response = api.get(f"/api/parts/{RESISTOR_ID}/footprint.svg")
+    assert response.status_code == 404
+    assert "assets acquire" in response.json()["detail"]
+
+
+def test_a_3d_model_is_not_rendered(client) -> None:
+    api, _paths, _conn = client
+    assert api.get(f"/api/parts/{RESISTOR_ID}/model3d.svg").status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# The add-part wizard
+# ---------------------------------------------------------------------------
+
+
+def test_adding_a_part_needs_an_mpn(client) -> None:
+    api, _paths, _conn = client
+    assert api.post("/api/parts", json={"mpn": "  "}).status_code == 400
+
+
+def test_adding_a_part_runs_as_a_job_and_yields_a_draft(client) -> None:
+    """`offline` keeps the test off the network, exactly as `--offline` does."""
+    api, _paths, conn = client
+    job = api.post("/api/parts", json={"mpn": "TEST-PART-1", "manufacturer": "Acme",
+                                       "offline": True}).json()
+    finished = _settle(api, job["id"])
+
+    assert finished["state"] == JobState.DONE
+    part = get_part(conn, finished["result"]["klm_id"])
+    assert part is not None
+    assert part.mpn == "TEST-PART-1"
+    assert str(part.status) == "draft", "nothing is approved automatically"
+
+
+def test_a_part_with_no_manufacturer_fails_with_a_sentence(client) -> None:
+    """Manufacturer + MPN is what identifies a part, so klm refuses rather than guess.
+
+    The job fails; it does not create an unaddressable half-record, and it does
+    not fill in "Unknown". The message names the fix.
+    """
+    api, _paths, _conn = client
+    job = api.post("/api/parts", json={"mpn": "TEST-PART-2", "offline": True}).json()
+    finished = _settle(api, job["id"])
+
+    assert finished["state"] == JobState.FAILED
+    assert "--mfr" in finished["error"]
+
+
+# ---------------------------------------------------------------------------
+# The sync diff
+# ---------------------------------------------------------------------------
+
+
+def test_the_diff_route_translates_the_service(client, tmp_path: Path) -> None:
+    api, _paths, conn = client
+    from klm.kicad.project import find_project
+    from klm.services.sync import diff_part
+    from klm.store import AssetStore
+
+    paths = _paths_of(client)
+    project = find_project(make_project(tmp_path / "proj"))
+    api.post("/api/projects/vendor", json={"path": str(project.root)})
+    _drain_jobs(api)
+
+    payload = api.get(
+        "/api/projects/diff", params={"path": str(project.root), "klm_id": RESISTOR_ID}
+    ).json()
+    expected = diff_part(conn, AssetStore(paths.assets), find_project(project.root), RESISTOR_ID)
+
+    assert payload["state"] == str(expected.row.state)
+    assert len(payload["assets"]) == len(expected.diffs)
+
+
+def test_diffing_an_unvendored_part_is_a_404(client, tmp_path: Path) -> None:
+    api, _paths, _conn = client
+    from klm.kicad.project import find_project
+
+    project = find_project(make_project(tmp_path / "proj2"))
+    api.post("/api/projects/vendor", json={"path": str(project.root)})
+    _drain_jobs(api)
+
+    response = api.get(
+        "/api/projects/diff",
+        params={"path": str(project.root), "klm_id": "01JB4K7QW8ZR3XN5M2VYT9DCFZ"},
+    )
+    assert response.status_code == 404
+
+
+def _paths_of(client):  # type: ignore[no-untyped-def]
+    return client[1]
+
+
+def _drain_jobs(api) -> None:  # type: ignore[no-untyped-def]
+    for job in api.get("/api/jobs").json():
+        _settle(api, job["id"])
 
 
 # ---------------------------------------------------------------------------

@@ -36,12 +36,13 @@ from klm.services.demand import parse_build_plan, plan_demand
 from klm.services.generate import generate
 from klm.services.lint import Selector, lint_catalog
 from klm.services.orders import get_order, list_orders, pins, receive
+from klm.services.preview import PreviewError, render_part
 from klm.services.split import split_order
 from klm.services.stock import list_stock, where
-from klm.services.sync import sync_status
-from klm.services.vendor import unvendor, vendor
+from klm.services.sync import diff_part, sync_status
+from klm.services.vendor import VendorError, unvendor, vendor
 from klm.services.verify import verify_clean_room
-from klm.store import AssetStore, Paths, connect
+from klm.store import AssetKind, AssetStore, Paths, connect
 
 __all__ = ["STATIC_DIR", "create_app"]
 
@@ -75,7 +76,7 @@ def create_app(catalog: str | Path | None = None) -> Any:
     """
     try:
         from fastapi import FastAPI, HTTPException
-        from fastapi.responses import FileResponse, StreamingResponse
+        from fastapi.responses import FileResponse, Response, StreamingResponse
         from fastapi.staticfiles import StaticFiles
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised by hand
         raise RuntimeError(
@@ -176,6 +177,102 @@ def create_app(catalog: str | Path | None = None) -> Any:
         finally:
             conn.close()
 
+    @app.post("/api/parts")
+    def create_part(body: dict[str, Any]) -> dict[str, Any]:
+        """The add-part wizard's one call — a job, because it goes to the network.
+
+        Everything the wizard collects is a keyword of `add_part`; nothing is
+        interpreted here. A blank field stays blank, and `AddReport.notes` is
+        what tells the user which ones klm could not fill.
+        """
+        mpn = str(body.get("mpn", "")).strip()
+        if not mpn:
+            raise HTTPException(400, "a part needs an MPN")
+        offline = bool(body.get("offline"))
+
+        def work(report):  # type: ignore[no-untyped-def]
+            from klm.services.part_add import add_part
+            from klm.suppliers.registry import build_adapters
+
+            config = load_config(paths.config)
+            adapters = (
+                {} if offline else build_adapters(config, paths.supplier_cache, offline=False)
+            )
+            report(f"looking up {mpn}" + (" (offline)" if offline else ""))
+            conn = db()
+            try:
+                added = add_part(
+                    conn,
+                    AssetStore(paths.assets),
+                    mpn=mpn,
+                    manufacturer=str(body.get("manufacturer", "")),
+                    category=body.get("category") or None,
+                    package=body.get("package") or None,
+                    value=str(body.get("value", "")),
+                    description=str(body.get("description", "")),
+                    datasheet=body.get("datasheet") or None,
+                    fields=dict(body.get("fields") or {}),
+                    lcsc=body.get("lcsc") or None,
+                    adapters=adapters,
+                )
+            finally:
+                conn.close()
+
+            for note in added.notes:
+                report(note)
+            assets = added.assets
+            if assets is not None:
+                for acquired in assets.acquired:
+                    report(f"{acquired.kind.value}: {acquired.origin} — {acquired.detail}")
+                for kind, reason in assets.unavailable:
+                    report(f"{kind}: {reason}")
+            for offer in added.offers:
+                report(f"offer {offer.supplier}:{offer.supplier_pn}")
+            return {
+                "klm_id": added.part.klm_id,
+                "created": added.created,
+                "ok": added.ok,
+                "notes": added.notes,
+                "qa": [
+                    {
+                        "kind": a.kind.value,
+                        "status": str(a.qa.status) if a.qa else "unchecked",
+                        "findings": [
+                            {"check": c.check, "status": str(c.status), "detail": c.detail}
+                            for c in a.qa.results
+                        ]
+                        if a.qa
+                        else [],
+                    }
+                    for a in (assets.acquired if assets else [])
+                ],
+                "unavailable": [
+                    {"kind": k, "reason": r} for k, r in (assets.unavailable if assets else [])
+                ],
+            }
+
+        return jobs.start("part add", work).to_json()
+
+    @app.get("/api/parts/{klm_id}/{kind}.svg")
+    def part_preview(klm_id: str, kind: str) -> Any:
+        """A drawing of the symbol or footprint, rendered without KiCad."""
+        if kind not in ("symbol", "footprint"):
+            raise HTTPException(404, f"cannot draw {kind!r}")
+        conn = db()
+        try:
+            found = get_part(conn, klm_id)
+            if found is None:
+                raise HTTPException(404, f"no part {klm_id}")
+        finally:
+            conn.close()
+        try:
+            svg = render_part(AssetStore(paths.assets), found, AssetKind(kind))
+        except PreviewError as exc:
+            # 404, not 500: "this part has no footprint" is a fact about the
+            # catalog, not a failure of the server, and the UI shows the reason.
+            raise HTTPException(404, str(exc)) from exc
+        return Response(svg, media_type="image/svg+xml")
+
     def _offers(conn: sqlite3.Connection, klm_id: str) -> list[Any]:
         from klm.services.offers import list_offers
 
@@ -238,6 +335,36 @@ def create_app(catalog: str | Path | None = None) -> Any:
             return payload
         finally:
             conn.close()
+
+    @app.get("/api/projects/diff")
+    def project_diff(path: str, klm_id: str) -> dict[str, Any]:
+        """One vendored part's drift, side by side."""
+        conn = db()
+        try:
+            result = diff_part(conn, AssetStore(paths.assets), project_at(path), klm_id)
+        except VendorError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        finally:
+            conn.close()
+        return {
+            "klm_id": result.row.klm_id,
+            "mpn": result.row.mpn,
+            "state": str(result.row.state),
+            "detail": result.row.detail,
+            "assets": [
+                {
+                    "kind": str(d.kind),
+                    "side": d.side,
+                    "name": d.name,
+                    "changed": d.changed,
+                    "note": d.note,
+                    "before": d.before,
+                    "after": d.after,
+                    "unified": d.unified,
+                }
+                for d in result.diffs
+            ],
+        }
 
     @app.post("/api/projects/vendor")
     def vendor_project(body: dict[str, Any]) -> dict[str, Any]:

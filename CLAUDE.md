@@ -14,9 +14,9 @@ library sync (`klm vendor` / `unvendor`, the lock file, `klm sync status|pull|pu
 correction table and `klm fab feedback`), and repository scaffolding and CI (`klm verify
 --clean-room`, `klm scaffold`, `klm docs`, `klm report`, timestamp normalisation), and ordering and
 inventory (`klm order plan|export|mark-placed|receive|pin`, `klm stock *`, `klm labels *`). **Q1, Q2, Q3 and Q11 are resolved; Q4 was checked and is
-still open, but no longer blocks anything shipped.** **Q8 is resolved too.** Phase 8 (the desktop app) has its API
-and four of its screens; the add-part wizard, SVG previews and the sync diff remain. Phase 9 (the AI
-research agent) is next.
+still open, but no longer blocks anything shipped.** **Q8 is resolved too.** Phase 8 (the desktop
+app) is complete: the API, the job model, eight screens, an SVG renderer for symbols and
+footprints, and the sync diff. Phase 9 (the AI research agent) is next.
 
 - `README.md` — entry point and documentation map
 - `docs/01`–`docs/15` — the design, one concern per document
@@ -149,6 +149,23 @@ These are the things that will bite an implementer who hasn't read the docs.
   `klm serve` rather than raising.
 - **A job's terminal state is assigned last.** A watcher stops as soon as it sees `done`/`failed`,
   so setting the state before recording the traceback lets it stop mid-write.
+- **Previews are rendered by klm, not `kicad-cli`.** `kicad/render.py` draws symbols and
+  footprints from the S-expression, because the machine with no KiCad is exactly the one
+  reviewing a part it has not seen. It is a *preview, not a plot*: unknown shapes are skipped
+  rather than approximated, and only a fixed set of layers is drawn. **STEP is not rendered at
+  all** — a wrong picture of a 3D model is the failure this project refuses everywhere else.
+- **Symbol space is Y-up; footprint space is Y-down.** Only the symbol renderer negates y. A
+  missed flip renders a legible, plausible, mirrored symbol with pin 1 in the wrong corner.
+- **A pin's `at` is its connection point and its angle points *towards the body*.** Reversing it
+  draws every pin inside the outline, which still looks like a resistor.
+- **The sync diff never compares the catalog asset against the vendored one.** They differ
+  permanently by design, so that diff never empties. Each side is compared against *its own*
+  recorded state. The project side's "before" is rebuilt through `build_library` and only shown
+  if it reproduces the recorded hash — otherwise it is a guess, and a guessed diff invites
+  someone to resolve a conflict that is not there. See `services/sync.py` `diff_part`.
+- **`klm part add` refuses without a manufacturer.** manufacturer + MPN is the catalog's
+  uniqueness key and what `find_by_mpn` needs, so a part without one is unaddressable rather than
+  half-filled. It used to raise `CatalogError` from three layers down.
 - **Vendoring stamps `KLM_ID` onto schematic instances.** KiCad copies library fields onto an
   instance at placement, so klm-built boards carry it already — but an adopted board does not, and
   without the stamp the BOM, ordering and cost all see an empty project.

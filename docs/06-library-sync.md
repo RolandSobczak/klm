@@ -220,6 +220,49 @@ $ klm sync status
 
 `--exit-code` makes it CI-usable: non-zero when anything is not `clean`.
 
+### `klm sync diff`
+
+`status` says *that* something moved; `diff` says what. It prints the same pair of comparisons the
+table above is built from — **each side against its own recorded state**, never one against the
+other:
+
+```
+$ klm sync diff USB-C-16P
+USB-C-16P  [conflict]
+  catalog: symbol; project: footprint
+
+~ catalog: symbol USB-C-16P
+--- USB-C-16P (recorded)
++++ USB-C-16P (now)
+@@ …
+✓ catalog: footprint USB_C_Receptacle_16P — unchanged
+✓ project: symbol USB-C-16P — unchanged
+~ project: footprint USB_C_Receptacle_16P
+--- USB_C_Receptacle_16P (as vendored)
++++ USB_C_Receptacle_16P (now)
+@@ …
+```
+
+**The catalog asset and the vendored one are never diffed against each other**, however natural
+that screen sounds. §5 is why: the vendored symbol was renamed and re-fielded on the way in and
+its footprint points inside the project, so those two differ permanently and by design. A diff
+that never empties is one its reader learns to skip.
+
+The catalog side comes straight out of the content-addressed store — the recorded asset is still
+there, because assets are immutable. The project side is harder: klm records the vendored copy's
+*hash*, never its bytes. So the "before" is rebuilt through `build_library` — the same function
+that wrote it — from the catalog assets the lock recorded, and then checked against the recorded
+hash. **If the rebuild does not reproduce that hash, it is reported as unavailable rather than
+shown.** It happens for real: correct an MPN and the symbol's fields change, so the copy as
+vendored is no longer reconstructible. A "before" assembled from today's fields would look right
+and invite someone to resolve a conflict that is not there.
+
+Both sides are canonicalised before diffing, so the text shows what the *hash* saw. Without that,
+a reformat that changed no content would print a screen of whitespace next to a verdict of
+"unchanged" — the kind of contradiction that costs a tool its credibility.
+
+A 3D model is compared by hash and not shown: STEP is binary, and a diff of it would be noise.
+
 ### `klm sync pull`
 
 Bring `global-ahead` changes into the vendored project. Re-copies the assets, rewrites paths,

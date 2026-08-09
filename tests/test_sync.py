@@ -20,7 +20,15 @@ from klm.kicad.sexpr import dumps_canonical, loads
 from klm.model import PartStatus
 from klm.services.catalog import get_part, save_part
 from klm.services.lockfile import read_lock
-from klm.services.sync import SyncState, adopt, promote, pull, push, sync_status
+from klm.services.sync import (
+    SyncState,
+    adopt,
+    diff_part,
+    promote,
+    pull,
+    push,
+    sync_status,
+)
 from klm.services.vendor import VendorError, vendor
 from klm.store.assets import AssetKind, AssetStore
 
@@ -370,3 +378,114 @@ def test_the_collaboration_round_trip(env, tmp_path: Path) -> None:
     # And the catalog now carries it, as a draft awaiting review.
     part = get_part(conn, promoted.klm_id)
     assert part is not None and part.status is PartStatus.DRAFT
+
+
+# ---------------------------------------------------------------------------
+# diff
+# ---------------------------------------------------------------------------
+#
+# The comparison the screen must *not* make is catalog-against-vendored: those
+# two are permanently different by design, so a diff of them never empties and
+# teaches the reader to ignore it. Each side is compared against its own
+# recorded state instead, which is the same thing `sync status` decides on.
+
+
+def test_a_clean_part_diffs_to_nothing(env) -> None:
+    project, store, conn = vendored(env)
+    result = diff_part(conn, store, project, RESISTOR_ID)
+    assert result.row.state is SyncState.CLEAN
+    assert result.changed == []
+
+
+def test_a_catalog_change_shows_on_the_catalog_side_only(env) -> None:
+    project, store, conn = vendored(env)
+    move_catalog_forward(conn, store)
+
+    result = diff_part(conn, store, project, RESISTOR_ID)
+    assert result.row.state is SyncState.GLOBAL_AHEAD
+    assert {d.side for d in result.changed} == {"catalog"}
+
+    symbol = next(d for d in result.changed if d.kind is AssetKind.SYMBOL)
+    assert '(name "A")' in symbol.after
+    assert '(name "~")' in symbol.before
+    assert '+' in symbol.unified
+
+
+def test_a_local_edit_shows_on_the_project_side_only(env) -> None:
+    project, store, conn = vendored(env)
+    edit_the_project_copy(project)
+
+    result = diff_part(conn, store, project, RESISTOR_ID)
+    assert result.row.state is SyncState.PROJECT_AHEAD
+    assert {d.side for d in result.changed} == {"project"}
+
+    footprint = next(d for d in result.changed if d.kind is AssetKind.FOOTPRINT)
+    assert "0.6" in footprint.after
+    assert footprint.note == "", "the as-vendored copy is reconstructible here"
+    assert "-" in footprint.unified
+
+
+def test_a_conflict_shows_both_sides(env) -> None:
+    project, store, conn = vendored(env)
+    move_catalog_forward(conn, store)
+    edit_the_project_copy(project)
+
+    result = diff_part(conn, store, project, RESISTOR_ID)
+    assert result.row.state is SyncState.CONFLICT
+    assert {d.side for d in result.changed} == {"catalog", "project"}
+
+
+def test_the_project_side_before_is_the_bytes_klm_actually_wrote(env) -> None:
+    """Reconstructed through the shared builder, then checked against the hash.
+
+    If the rebuild did not reproduce the recorded hash it would be a guess, and
+    a guessed diff invites someone to resolve a conflict that is not there — so
+    it is presented only when it verifies, and a note says so when it does not.
+    """
+    project, store, conn = vendored(env)
+    edit_the_project_copy(project)
+
+    diff = next(
+        d
+        for d in diff_part(conn, store, project, RESISTOR_ID).diffs
+        if d.side == "project" and d.kind is AssetKind.FOOTPRINT
+    )
+    on_disk = project.footprint_library("my-board") / "R_0402_1005Metric.kicad_mod"
+    assert diff.before == dumps_canonical(loads(on_disk.read_text().replace("0.60", "0.56")))
+
+
+def test_an_unreconstructible_copy_is_admitted_not_invented(env) -> None:
+    """Rename the part and the vendored symbol can no longer be rebuilt exactly.
+
+    The honest answer is the current file plus a sentence saying the other side
+    is unavailable — not a plausible "before" assembled from today's fields.
+    """
+    project, store, conn = vendored(env)
+    part = get_part(conn, RESISTOR_ID)
+    assert part is not None
+    part.mpn = "RC0402FR-0710KL"
+    part.updated_at = None
+    save_part(conn, part)
+
+    symbol = next(
+        d
+        for d in diff_part(conn, store, project, RESISTOR_ID).diffs
+        if d.side == "project" and d.kind is AssetKind.SYMBOL
+    )
+    assert symbol.before == ""
+    assert "could not be reconstructed" in symbol.note
+    assert symbol.after, "the file that is there is still shown"
+
+
+def test_a_3d_model_is_compared_by_hash_and_says_so(env) -> None:
+    project, store, conn = vendored(env, include_3d=True)
+    models = [d for d in diff_part(conn, store, project, RESISTOR_ID).diffs
+              if d.kind is AssetKind.MODEL3D]
+    assert models
+    assert all("binary" in d.note and not d.before for d in models)
+
+
+def test_diffing_a_part_that_was_never_vendored_is_an_error(env) -> None:
+    project, store, conn = vendored(env)
+    with pytest.raises(VendorError, match="not in"):
+        diff_part(conn, store, project, "01JB4K7QW8ZR3XN5M2VYT9DCFZ")

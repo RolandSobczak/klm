@@ -45,6 +45,7 @@ from klm.services.generate import generate
 from klm.services.importer import import_symbol_library
 from klm.services.labels import labels_for_parts, render_png, resolve_short_id, write_pdf
 from klm.services.lint import RULES, LintReport, Selector, Severity, lint_catalog
+from klm.services.lockfile import read_lock
 from klm.services.offers import (
     TIMESTAMP_FORMAT,
     delete_offer,
@@ -66,6 +67,7 @@ from klm.services.orders import (
     receive,
 )
 from klm.services.part_add import add_part
+from klm.services.preview import PreviewError, render_part
 from klm.services.register import apply_plan, plan_registration
 from klm.services.scaffold import KICAD_IMAGE, apply_scaffold, plan_scaffold
 from klm.services.split import Assignment, split_order
@@ -83,6 +85,7 @@ from klm.services.sync import (
     SyncState,
     SyncStatus,
     adopt,
+    diff_part,
     promote,
     pull,
     push,
@@ -254,6 +257,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     gen = sub.add_parser("generate", help="Rebuild the KiCad libraries from the catalog.")
     gen.set_defaults(func=cmd_generate)
+
+    render = sub.add_parser("render", help="Draw a part's symbol or footprint as SVG.")
+    render.add_argument("part", metavar="PART", help="KLM_ID or MPN.")
+    render.add_argument(
+        "--footprint",
+        dest="kind",
+        action="store_const",
+        const="footprint",
+        default="symbol",
+        help="Draw the footprint instead of the symbol.",
+    )
+    render.add_argument(
+        "--output", "-o", metavar="FILE", help="Write here instead of standard output."
+    )
+    render.set_defaults(func=cmd_render)
 
     reg = sub.add_parser("register", help="Register klm's libraries with KiCad.")
     reg.add_argument(
@@ -558,6 +576,18 @@ def _add_sync_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) 
     )
     status.add_argument("--format", choices=("text", "json"), default="text")
     status.set_defaults(func=cmd_sync_status)
+
+    diff_cmd = actions.add_parser("diff", help="Show what moved under one vendored part.")
+    _project_argument(diff_cmd)
+    diff_cmd.add_argument("part", metavar="PART", help="MPN, symbol name or KLM_ID.")
+    diff_cmd.add_argument(
+        "--side",
+        choices=("both", "catalog", "project"),
+        default="both",
+        help="Which side's drift to print.",
+    )
+    diff_cmd.add_argument("--format", choices=("text", "json"), default="text")
+    diff_cmd.set_defaults(func=cmd_sync_diff)
 
     pull_cmd = actions.add_parser("pull", help="Bring catalog changes into the project.")
     _project_argument(pull_cmd)
@@ -1786,6 +1816,102 @@ def cmd_sync_status(args: argparse.Namespace) -> int:
             print(f"\n{_OK} in step with the catalog")
 
     return EXIT_CHECK_FAILED if (args.exit_code and status.attention) else EXIT_OK
+
+
+def cmd_sync_diff(args: argparse.Namespace) -> int:
+    paths, project = _open_project(args)
+    _require_vendored(project)
+    conn = connect(paths.db, create=False)
+    try:
+        klm_id = _resolve_vendored(conn, project, args.part)
+        result = diff_part(conn, AssetStore(paths.assets), project, klm_id)
+    finally:
+        conn.close()
+
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "klm_id": result.row.klm_id,
+                    "mpn": result.row.mpn,
+                    "state": str(result.row.state),
+                    "assets": [
+                        {
+                            "kind": str(d.kind),
+                            "side": d.side,
+                            "name": d.name,
+                            "changed": d.changed,
+                            "note": d.note,
+                            "unified": d.unified,
+                        }
+                        for d in result.diffs
+                        if args.side in ("both", d.side)
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return EXIT_OK
+
+    print(f"{result.row.mpn or result.row.klm_id}  [{result.row.state}]")
+    if result.row.detail:
+        print(f"  {result.row.detail}")
+    shown = [d for d in result.diffs if args.side in ("both", d.side)]
+    for entry in shown:
+        head = f"\n{'~' if entry.changed else _OK} {entry.side}: {entry.kind} {entry.name}"
+        print(head if entry.changed else f"{head} — unchanged")
+        if entry.note:
+            print(f"  {_INFO} {entry.note}")
+        if entry.changed and entry.unified:
+            print(entry.unified.rstrip("\n"))
+    if not shown:
+        print(f"  {_INFO} nothing recorded to compare against")
+    return EXIT_OK
+
+
+def _resolve_vendored(conn: sqlite3.Connection, project: KiCadProject, reference: str) -> str:
+    """A KLM_ID from whatever the user typed — an id, an MPN or a symbol name.
+
+    Falls back to the lock file rather than only the catalog, because the part
+    a user most wants to diff is often the orphan the catalog has never heard
+    of, and "no such part" would be the least useful possible answer.
+    """
+    lock = read_lock(project.lock_file)
+    if lock.by_id(reference) is not None:
+        return reference
+    by_symbol = lock.by_symbol(reference)
+    if by_symbol is not None:
+        return by_symbol.klm_id
+    matches = {e.klm_id for e in lock.entries if e.mpn.lower() == reference.lower()}
+    if len(matches) == 1:
+        return matches.pop()
+    if len(matches) > 1:
+        raise LookupError(f"{reference!r} matches several vendored parts: {', '.join(matches)}")
+    return _resolve_part(conn, reference).klm_id
+
+
+def cmd_render(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        part = _resolve_part(conn, args.part)
+    finally:
+        conn.close()
+
+    kind = AssetKind.FOOTPRINT if args.kind == "footprint" else AssetKind.SYMBOL
+    try:
+        svg = render_part(AssetStore(paths.assets), part, kind)
+    except PreviewError as exc:
+        print(f"{_FAIL} {exc}", file=sys.stderr)
+        return EXIT_CHECK_FAILED
+
+    if args.output:
+        Path(args.output).write_text(svg, encoding="utf-8")
+        print(f"{_OK} {args.output}")
+    else:
+        print(svg)
+    return EXIT_OK
 
 
 def cmd_sync_pull(args: argparse.Namespace) -> int:

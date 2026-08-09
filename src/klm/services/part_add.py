@@ -10,9 +10,16 @@ Two rules it inherits from everything else in klm:
 * **The result is a `draft`.** A part that arrived automatically has not been
   looked at by a human, and only `approved` parts are usable in a design. The
   pipeline produces something worth reviewing; it does not decide the review.
-* **A gap is reported, not filled.** A part with no manufacturer gets no
-  manufacturer, and the report says so. Inventing "Unknown" and moving on is how
-  a catalog fills with parts nobody can order.
+* **A gap is reported, not filled.** Where klm could not find something, it
+  says which supplier it asked and what came back. Inventing "Unknown" and
+  moving on is how a catalog fills with parts nobody can order.
+
+The one gap that stops the command rather than being noted is the manufacturer.
+A part is identified by manufacturer *and* MPN — the catalog's uniqueness index
+is that pair, and `find_by_mpn` needs both — so a part without one is not a
+half-filled record but an unaddressable one. Refusing with "pass --mfr" is a
+sentence someone can act on; the alternative was a `CatalogError` from three
+layers down, which is what this used to do.
 """
 
 from __future__ import annotations
@@ -88,9 +95,12 @@ def add_part(
         datasheet = resolved.datasheet_url
 
     if not manufacturer:
-        # Deliberately left blank rather than filled with a placeholder: lint
-        # rule S001 will say so, which is a question a human can answer.
-        report_notes.append("manufacturer is unknown — S001 will report it")
+        asked = ", ".join(sorted(adapters or {})) if adapters else "no supplier (offline)"
+        raise ValueError(
+            f"no manufacturer for {mpn!r} — asked {asked}. Say who makes it (`--mfr`, or the "
+            "Manufacturer field); klm will not invent one, because manufacturer + MPN is "
+            "what identifies a part."
+        )
 
     existing = find_by_mpn(conn, manufacturer, mpn) if manufacturer else None
     part = Part(
