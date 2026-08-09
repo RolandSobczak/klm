@@ -40,8 +40,10 @@ klm export | klm import          SQLite ↔ YAML mirror
 klm register [--check]           KiCad lib tables + env vars
 
 SOURCING
-klm refresh [--stale 7d] [--project .]
-klm offers <klm_id>
+klm refresh [--stale 7d] [--part ID|MPN] [--supplier tme] [--no-discover] [--offline]
+klm offers [ID|MPN] [--supplier lcsc] [--qty 100] [--format json]
+klm offers <ID|MPN> --supplier lcsc --add C8734 --price 1.42 --stock 4200
+klm offers --supplier lcsc --remove C8734
 
 SYNC
 klm vendor [--with-3d] [--dry-run]

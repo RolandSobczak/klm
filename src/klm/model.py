@@ -14,9 +14,12 @@ from enum import StrEnum
 __all__ = [
     "Confidence",
     "Lifecycle",
+    "Offer",
+    "Packaging",
     "Parameter",
     "Part",
     "PartStatus",
+    "PriceBreak",
     "SourceKind",
 ]
 
@@ -129,3 +132,91 @@ class Part:
             for name, group in sorted(grouped.items())
             if len({p.value for p in group}) > 1
         ]
+
+
+class Packaging(StrEnum):
+    """How the supplier ships the part.
+
+    Not cosmetic: JLCPCB assembly and a hand-soldered prototype want different
+    packaging of the same die, and the price usually differs between them.
+    """
+
+    CUT_TAPE = "cut tape"
+    REEL = "reel"
+    TRAY = "tray"
+    TUBE = "tube"
+    BAG = "bag"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True, slots=True)
+class PriceBreak:
+    """One row of a supplier's quantity/price ladder."""
+
+    qty: int
+    unit_price: float
+
+    def __post_init__(self) -> None:
+        if self.qty < 1:
+            raise ValueError(f"price break quantity must be positive, got {self.qty}")
+        if self.unit_price < 0:
+            raise ValueError(f"price break price cannot be negative, got {self.unit_price}")
+
+
+@dataclass(slots=True)
+class Offer:
+    """A specific orderable item at a specific supplier (docs/02 §1).
+
+    Offers are **derived data**: a cache of a remote fact, always stamped with
+    when it was fetched. They are never hand-edited as truth and losing them
+    costs one API refresh — which is why ``fetched_at`` is not optional in
+    spirit even where the type allows it.
+
+    ``klm_id`` is ``None`` on an offer an adapter has just returned and not yet
+    matched to a part. Persisting one in that state is an error, not a default.
+    """
+
+    supplier: str
+    supplier_pn: str
+    klm_id: str | None = None
+    mpn: str | None = None
+    """The supplier's own idea of the MPN, kept for auditing the match."""
+    manufacturer: str | None = None
+    description: str = ""
+    packaging: Packaging = Packaging.UNKNOWN
+    moq: int | None = None
+    multiple: int | None = None
+    stock: int | None = None
+    currency: str | None = None
+    price_breaks: list[PriceBreak] = field(default_factory=list)
+    lead_time_days: int | None = None
+    url: str | None = None
+    datasheet_url: str | None = None
+    match_confidence: Confidence = Confidence.HIGH
+    """How sure klm is that this offer is the same part, not merely a similar one."""
+    fetched_at: str | None = None
+
+    @property
+    def in_stock(self) -> bool:
+        """Unknown stock is not the same as zero, and must not read as it."""
+        return self.stock is not None and self.stock > 0
+
+    def sorted_breaks(self) -> list[PriceBreak]:
+        return sorted(self.price_breaks, key=lambda b: b.qty)
+
+    def unit_price(self, qty: int = 1) -> float | None:
+        """Price per unit at ``qty``: the last break whose quantity it reaches.
+
+        Below the smallest break there is no price to quote — the supplier has
+        not offered one — so this returns ``None`` rather than extrapolating.
+        """
+        applicable = [b for b in self.sorted_breaks() if b.qty <= qty]
+        return applicable[-1].unit_price if applicable else None
+
+    def order_qty(self, needed: int) -> int:
+        """``needed`` rounded up to the supplier's MOQ and order multiple."""
+        qty = max(needed, self.moq or 1)
+        multiple = self.multiple or 1
+        if multiple > 1:
+            qty = -(-qty // multiple) * multiple
+        return qty

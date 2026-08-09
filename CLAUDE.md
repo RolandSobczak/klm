@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-Phases 0 and 1 of `docs/13-roadmap.md` are implemented: file handling, the store, the catalog and
-its git mirror, library generation and KiCad registration, the field schema, value normalization,
-`klm lint` and the pre-commit hook. Phase 2 (supplier sourcing) is next and is blocked on Q1/Q2
-below.
+Phases 0, 1 and 2 of `docs/13-roadmap.md` are implemented: file handling, the store, the catalog
+and its git mirror, library generation and KiCad registration, the field schema, value
+normalization, `klm lint` and the pre-commit hook, and the supplier layer — adapter protocol, TME,
+LCSC, offers, matching, `klm refresh` / `klm offers` and lint group P. **Q1 and Q2 are both
+resolved** (see below). Phase 3 (asset pipeline) is next.
 
 - `README.md` — entry point and documentation map
 - `docs/01`–`docs/15` — the design, one concern per document
@@ -75,6 +76,18 @@ These are the things that will bite an implementer who hasn't read the docs.
 - **klm writes outside its own directory** — KiCad's global config, users' project files. Those
   writes back up first, support `--dry-run`, and merge rather than overwrite (klm touches only
   rows it owns in `sym-lib-table` / `fp-lib-table` / `kicad_common.json`).
+- **`klm lint` never touches the network.** It runs in a pre-commit hook and in CI, and a linter
+  whose result depends on whether TME is up fails randomly and gets switched off. Staleness (P003)
+  is measured against what is stored; fetching is `klm refresh`'s job, explicitly.
+- **Refreshing an offer is not re-matching it.** A refresh re-reads price and stock for a link a
+  human or a confident match already blessed. Re-adjudicating identity on every refresh would let a
+  wrong match appear silently months after the part was approved.
+- **A low-confidence match is never stored.** `klm refresh` reports it as a proposal instead — an
+  offer in the database is one klm is willing to order against.
+- **Timestamps in SQL comparisons need `strftime`, not `datetime`.** klm stamps
+  `2026-08-09T12:00:00Z`; SQLite's `datetime()` returns `2026-08-09 12:00:00`. Compared as strings
+  those disagree wherever the dates are equal, because `T` sorts after a space. See
+  `TIMESTAMP_FORMAT` in `services/offers.py`.
 - **The AI agent has no tool that writes to the catalog.** Architectural, not a prompt
   instruction. It proposes into a review queue; a human approves; the result is still only a
   `draft` that must pass asset QA and lint. See `docs/adr/0006`.
@@ -88,13 +101,16 @@ These are the things that will bite an implementer who hasn't read the docs.
 
 ## Before building anything
 
-`docs/14-open-questions.md` is the risk register. Two items block real work:
+`docs/14-open-questions.md` is the risk register. Q1 and Q2 are resolved (2026-08-09); Q3–Q6
+remain and block later phases.
 
-- **Q1** — TME's auth is signature-based, not the OAuth 2.0 the original note claimed. Verify
-  before writing the adapter.
-- **Q2** — LCSC has no official public API. This is the highest risk in the project. Verify the
-  terms before building against unofficial endpoints; manual entry is designed as a first-class
-  fallback precisely because this may not work out.
+- **Q1 — resolved.** TME's auth is signature-based, not OAuth: HMAC-SHA1 over
+  `POST&<enc URL>&<enc sorted query>`, base64, sent as `ApiSignature`. Still unverified: published
+  rate limits, and whether the v2 API differs — `developers.tme.eu` needs a login to check.
+- **Q2 — resolved, and it changed the design.** LCSC's official API is granted per *company*, and
+  its terms forbid redistributing the data or the documentation. klm's users won't get it, so
+  **manual entry is the primary LCSC path** and klm ships no unofficial-endpoint client in any
+  mode. See `docs/adr/0009`. Do not add one.
 
 ## Roadmap
 

@@ -30,13 +30,17 @@ quirks are absorbed inside the adapter and never leak.
 TME is the domestic supplier: fast delivery, invoicing, PLN pricing, the default for anything
 needed this week.
 
-- **API**: a documented REST API requiring registration for an application key and secret.
-  Relevant operations: product search, `GetProducts` (details), `GetPrices` / `GetStocks`,
-  `GetParameters`, `GetProductsFiles` (datasheets).
-- **Authentication**: request signing with the application secret. ⚠️ The original design note
-  claimed OAuth 2.0; TME's published scheme is signature-based, not OAuth. **This must be verified
-  against current TME developer documentation before implementation** — see
-  [14 — Open questions](14-open-questions.md#q1).
+- **API**: a documented REST API requiring registration at `developers.tme.eu` for an application
+  token and secret. Relevant operations: `Products/Search`, `Products/GetProducts` (details),
+  `Products/GetPricesAndStocks`, `Products/GetParameters`, `Products/GetProductsFiles`
+  (datasheets).
+- **Authentication**: request signing — [Q1](14-open-questions.md#q1) is resolved, and the original
+  note's OAuth 2.0 claim was wrong. Each request carries an HMAC-SHA1 signature over
+  `POST&<percent-encoded URL>&<percent-encoded sorted query string>`, base64-encoded, sent as the
+  `ApiSignature` parameter. Parameters are sorted and flattened into `Name[0]` form *before*
+  signing. A bad signature returns `E_INVALID_SIGNATURE` and nothing else useful, so
+  `signature_base()` is a public pure function with its own tests rather than something buried in
+  the request path.
 - **Pricing**: net vs gross (VAT) matters for a Polish buyer. klm stores net prices and displays
   gross, with the VAT rate configurable.
 - **Currency**: PLN natively.
@@ -48,18 +52,30 @@ needed this week.
 LCSC is the cheap, slow, imported supplier and — critically — the one whose part numbers JLCPCB's
 assembly service consumes.
 
-- **API**: LCSC does not publish an official, documented public API for third-party use. Practical
-  options are the community `jlcsearch`-style services and the EasyEDA component endpoints that
-  `easyeda2kicad`-class tools already use.
-- ⚠️ **This is the single largest technical and legal risk in the project.** Unofficial endpoints
-  can change or disappear without notice, and using them may conflict with the operator's terms of
-  service. See [14 — Open questions](14-open-questions.md#q2). Mitigations:
-  - The LCSC adapter is isolated behind the same protocol as everything else, so it can be
-    replaced or degraded without touching services.
-  - A **manual mode** is a first-class fallback: paste an LCSC part number and the fields you can
-    see on the product page. klm remains fully functional with zero LCSC automation, just less
-    convenient.
-  - Requests are conservatively rate-limited and aggressively cached.
+- **API**: LCSC publishes an official API, but grants it **per company** — the application wants a
+  company website, a business licence and an estimated order volume — and its terms forbid
+  redistributing either the data or the documentation. klm's user will not be granted it.
+  [Q2](14-open-questions.md#q2) is resolved and the answer changed the design; see
+  [ADR-0009](adr/0009-lcsc-manual-first.md).
+- **Manual mode is the default and the primary path**, not a fallback:
+
+  ```bash
+  klm offers STM32F103C8T6 --supplier lcsc --add C8734 --price 1.42 --stock 4200
+  ```
+
+  Paste what you can see on the product page. The link is stored at `high` confidence, because a
+  human matching a part is a better signal than any string comparison klm can make. Everything
+  that needs no API still works automatically: part-number validation, product and datasheet URLs,
+  packaging-suffix handling, and the `LCSC` field JLCPCB's assembly service reads.
+- In manual mode every lookup **declines quietly** rather than raising. LCSC having no automated
+  answer is the expected state, not a failure — a refresh across 200 parts must not print 200
+  errors about it.
+- **klm ships no code against unofficial endpoints**, in any mode. The community `jlcsearch`-style
+  services and the EasyEDA component endpoints work today and may not tomorrow, and bulk-pulling
+  pricing from them is squarely what the terms prohibit. Isolating that behind an interface would
+  make it *replaceable*, not *permitted*.
+- `mode = "api"` accepts a user-supplied client satisfying the same protocol, for someone who has
+  been granted access and therefore holds documentation klm's authors may not.
 - **Currency**: USD. Converted for comparison using a rate the user sets or klm fetches; the
   original currency is always retained and shown.
 - **Landed cost**: a USD unit price is not comparable to a PLN one. See §6.
@@ -77,18 +93,32 @@ Offers are a cache of a remote fact, and the freshness required differs by conte
 
 Implementation:
 
-- HTTP responses cached on disk under `cache/suppliers/`, keyed by a hash of the request, with a
-  per-endpoint TTL.
-- A token-bucket rate limiter per supplier, configurable, defaulting well below any published
-  limit.
-- Retries with exponential backoff and jitter on 429/5xx; a circuit breaker that stops hammering
-  a supplier that's down and reports degraded mode to the UI.
-- `klm refresh --stale 7d` refreshes everything past a threshold; `klm refresh --project .`
-  refreshes only what a given board uses.
+- HTTP responses cached on disk under `cache/suppliers/<supplier>/`, keyed by a SHA-256 of method,
+  URL and body. **TTL is the caller's decision, per request**, not a property of the cache — that
+  is what makes the table above expressible. A corrupt cache entry is a cache miss, not an error:
+  the authoritative copy is one request away.
+- A token-bucket rate limiter per supplier, configurable, defaulting to 2 req/s. Being throttled is
+  a self-inflicted outage.
+- Retries with exponential backoff and jitter on 408/425/429/5xx. A 404 is an *answer* and is not
+  retried, so a malformed query cannot open the breaker.
+- A circuit breaker: after five consecutive failures it opens and fails fast; after the reset
+  window **one** request is let through to probe, not a thundering herd.
+- `klm refresh --stale 7d` refreshes everything past a threshold; `klm refresh --part <id>` one
+  part; `klm refresh --supplier tme` one supplier. (`--project .` arrives with phase 4, which is
+  what makes a project resolvable to catalog parts.)
 
-**klm always works offline**, in degraded mode: cached offers are served with a visible staleness
-marker, and any operation that requires fresh data (placing an order) refuses rather than
-guessing.
+**klm always works offline**, in degraded mode:
+
+- `--offline` serves the HTTP cache and never touches the network.
+- When a supplier fails mid-request and a cached response exists, the stale one is served rather
+  than the request failing. Stale beats absent; the offer's `fetched_at` says how stale.
+- An offer the supplier has stopped listing is **kept, not deleted** — deleting it would look
+  identical to never having had one, and it ages into P003 on its own.
+- A supplier that is down is reported **once per run**, not once per part.
+
+Clock, sleep and transport are all injected. A rate limiter you cannot test without waiting is a
+rate limiter that does not get tested, and one that isn't tested opens in production for the first
+time.
 
 ## 5. Matching a part to offers
 
@@ -107,8 +137,18 @@ MPN "STM32F103C8T6"
 Manufacturer aliasing needs its own normalized table; the same company appears under three or
 four names across two suppliers.
 
-Confidence is stored on the offer link. `klm lint` rule P00x flags low-confidence links for
-review, so a wrong auto-match surfaces before it reaches an order.
+Confidence is stored on the offer link, together with the reason it was assigned. A `low`
+confidence **never auto-links**: the candidate is reported by `klm refresh` and not written to the
+database at all, because an offer in the database is one klm is willing to order against. `medium`
+and `high` are stored, and `klm lint` rule P007 surfaces anything that later reads as doubtful.
+
+Two rules keep this honest:
+
+- **Fold nothing that carries meaning.** Case and whitespace fold; hyphens, slashes and dots do
+  not. `LM317T` and `LM317-T` are not reliably the same device.
+- **Refreshing is not re-matching.** A refresh re-reads price and stock for a link a human or a
+  confident match already blessed; it never re-adjudicates identity. Otherwise a wrong match could
+  appear silently months after the part was approved.
 
 ## 6. Comparing across suppliers
 
@@ -149,17 +189,24 @@ currency = "PLN"
 free_shipping_above = 250.0
 shipping_flat = 15.0
 vat_rate = 0.23
+rate_per_second = 2.0        # deliberately well below any published limit
+burst = 4.0
 
 [suppliers.lcsc]
 enabled = true
-mode = "unofficial"          # unofficial | manual
+mode = "manual"              # manual | api
 currency = "USD"
 shipping_flat = 12.0
 import_charges = true
 ```
 
+Blocks **merge onto the defaults** rather than replacing them, for the same reason field aliases
+do: setting one key on TME must not silently reset its VAT rate to zero.
+
 Credentials are referenced by environment variable, never stored in the config file, and never
-written to `event_log` or any diagnostic bundle.
+written to `event_log` or any diagnostic bundle. A literal secret in `api_key` is rejected at load
+time — `config.toml` lives in a directory users are encouraged to put under git, and a file format
+that invites pasting an API key into it is a file format that leaks API keys.
 
 Plausible future adapters — Mouser and DigiKey (which do publish official APIs, useful for
 *parametric research* even when shipping makes them unusable for purchase), Farnell, and Polish

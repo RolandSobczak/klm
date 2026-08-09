@@ -8,8 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from klm.cli.main import EXIT_CHECK_FAILED, EXIT_ERROR, EXIT_OK, main
-from klm.store import AssetKind, AssetStore, Paths, resolve_home
+from klm.cli.main import EXIT_CHECK_FAILED, EXIT_ERROR, EXIT_OK, main, parse_age
+from klm.services.catalog import get_part, list_parts
+from klm.store import AssetKind, AssetStore, Paths, connect, resolve_home
 from klm.store.db import SCHEMA_VERSION
 
 
@@ -326,3 +327,155 @@ def test_hook_never_rewrites_someone_elses_config(
     assert main(["hook", str(repo)]) == EXIT_CHECK_FAILED
     assert (repo / ".pre-commit-config.yaml").read_text(encoding="utf-8") == existing
     assert "klm-lint" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# refresh / offers
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("raw", "days"),
+    [("7d", 7), ("30", 30), ("2w", 14), ("24h", 1), ("36h", 2), ("1h", 1)],
+)
+def test_age_strings_round_up_to_whole_days(raw: str, days: int) -> None:
+    assert parse_age(raw) == days
+
+
+@pytest.mark.parametrize("raw", ["", "soon", "-3d", "0d"])
+def test_a_nonsense_age_is_refused_rather_than_guessed(raw: str) -> None:
+    with pytest.raises(ValueError):
+        parse_age(raw)
+
+
+def _imported(home: Path) -> str:
+    """Import the fixture library and return one part's id.
+
+    The fixture holds a derived symbol klm skips, so the import legitimately
+    exits non-zero. That is `test_import_from_kicad_*`'s business, not this
+    helper's.
+    """
+    assert main(["init"]) == EXIT_OK
+    main(["import", "--from-kicad", str(DRIFTED)])
+    conn = connect(Paths(home).db, create=False)
+    try:
+        return list_parts(conn)[0].klm_id
+    finally:
+        conn.close()
+
+
+def test_offers_on_an_empty_catalog_says_so_and_names_the_next_step(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _imported(home)
+    capsys.readouterr()
+
+    assert main(["offers"]) == EXIT_OK
+    assert "no offers recorded" in capsys.readouterr().out
+
+
+def test_offers_add_records_a_manual_lcsc_offer(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    klm_id = _imported(home)
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "offers", klm_id,
+                "--supplier", "lcsc",
+                "--add", "C25900",
+                "--price", "0.0012",
+                "--stock", "100000",
+            ]
+        )
+        == EXIT_OK
+    )
+    capsys.readouterr()
+
+    main(["offers", klm_id, "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload[0]["supplier_pn"] == "C25900"
+    assert payload[0]["unit_price"] == pytest.approx(0.0012)
+    assert payload[0]["match_confidence"] == "high"
+    assert payload[0]["url"].endswith("C25900.html")
+
+
+def test_offers_add_needs_a_part_and_a_supplier(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _imported(home)
+    capsys.readouterr()
+
+    assert main(["offers", "--add", "C25900"]) == EXIT_ERROR
+
+
+def test_offers_remove_reports_whether_there_was_one(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    klm_id = _imported(home)
+    main(["offers", klm_id, "--supplier", "lcsc", "--add", "C25900"])
+    capsys.readouterr()
+
+    assert main(["offers", "--supplier", "lcsc", "--remove", "C25900"]) == EXIT_OK
+    assert main(["offers", "--supplier", "lcsc", "--remove", "C25900"]) == EXIT_CHECK_FAILED
+
+
+def test_an_unknown_part_reference_is_an_error_not_a_silent_empty_list(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _imported(home)
+    capsys.readouterr()
+
+    assert main(["offers", "no-such-part"]) == EXIT_ERROR
+    assert "no part with id or MPN" in capsys.readouterr().err
+
+
+def test_a_part_can_be_named_by_its_mpn(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    klm_id = _imported(home)
+    conn = connect(Paths(home).db, create=False)
+    try:
+        mpn = get_part(conn, klm_id).mpn  # type: ignore[union-attr]
+    finally:
+        conn.close()
+    capsys.readouterr()
+
+    assert main(["offers", mpn, "--supplier", "lcsc", "--add", "C25900"]) == EXIT_OK
+    assert klm_id in capsys.readouterr().out
+
+
+def test_refresh_offline_with_a_cold_cache_degrades_instead_of_crashing(
+    home: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TME has no credentials here, so it reports as unconfigured — once."""
+    monkeypatch.delenv("TME_API_KEY", raising=False)
+    monkeypatch.delenv("TME_API_SECRET", raising=False)
+    _imported(home)
+    capsys.readouterr()
+
+    assert main(["refresh", "--offline"]) == EXIT_CHECK_FAILED
+    out = capsys.readouterr().out
+    assert out.count("TME needs an application token") == 1
+    assert "klm keeps what it had" in out
+
+
+def test_refresh_names_a_supplier_that_is_not_enabled(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _imported(home)
+    capsys.readouterr()
+
+    assert main(["refresh", "--supplier", "mouser"]) == EXIT_CHECK_FAILED
+    assert "no enabled supplier named mouser" in capsys.readouterr().out
+
+
+def test_refresh_does_not_reach_the_network_for_a_manual_supplier(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """LCSC defaults to manual mode, which must be quiet rather than failing."""
+    _imported(home)
+    capsys.readouterr()
+
+    assert main(["refresh", "--supplier", "lcsc"]) == EXIT_OK
+    assert "0 newly linked" in capsys.readouterr().out

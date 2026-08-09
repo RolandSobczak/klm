@@ -13,6 +13,8 @@ trade-off and an accident.
 | [0005](0005-desktop-shell.md) | Python core + local HTTP API + Tauri shell, with no logic in the shell | 8 |
 | [0006](0006-agent-cannot-write.md) | The AI agent proposes; it never writes to the catalog | 9 |
 | [0007](0007-clean-room-verification.md) | Self-containment is defined by clean-room CI verification, not local success | 6 |
+| [0008](0008-hand-written-yaml-emitter.md) | A hand-written YAML emitter rather than a dependency, for byte-stable output | 0 |
+| [0009](0009-lcsc-manual-first.md) | LCSC is manual-first; klm ships no unofficial-endpoint client | 2 |
 
 ## Format
 

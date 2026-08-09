@@ -139,14 +139,35 @@ id belonging to a *different* part, which is a real corruption rather than an ab
 
 ### Sourcing (`P`)
 
+Only `approved` parts are checked. A draft with no offers is a part someone is still working on,
+and saying so on every import would bury the findings that mean something.
+
 | ID | Severity | Rule | Fixable |
 |---|---|---|---|
 | P001 | warning | No offer at any configured supplier | no |
-| P002 | warning | All offers show zero stock | no |
-| P003 | warning | Offers older than the staleness threshold (default 30 days) | **yes** (refresh) |
-| P004 | error | SMD part intended for JLCPCB assembly has no `LCSC` field | no |
+| P002 | warning | Every offer shows zero stock | no |
+| P003 | warning | Offers older than the staleness threshold (default 30 days) | no |
+| P004 | warning | SMD part has no `LCSC` part number for JLCPCB assembly | no |
 | P005 | warning | Lifecycle is `obsolete` or `nrnd` | no |
-| P006 | warning | Datasheet URL returns a non-200 | no |
+| P006 | warning | Datasheet URL is missing | no |
+| P007 | warning | Offer is linked to this part at low confidence | no |
+
+Three of these differ from the original design, each for the same reason — **lint never touches
+the network**. It runs in a pre-commit hook and in CI, and a linter whose result depends on whether
+a supplier is up is a linter that fails randomly and gets switched off.
+
+- **P003 is not `--fix`able.** Fixing it means fetching. The finding names `klm refresh --stale`
+  instead, which is a separate, explicit act.
+- **P006 checks that a datasheet URL exists**, not that it returns 200. Reachability is a job for
+  `klm refresh`, which is already allowed out.
+- **P004 is a warning, not an error.** "Intended for JLCPCB assembly" has no flag to read until
+  phase 5 introduces one, so klm infers intent from an SMD-looking package. Inference is a
+  reasonable prompt; it is not grounds for failing a build.
+
+`P007` is new: it surfaces a low-confidence offer link for review, which is what
+[07 §5](07-supplier-integration.md#5-matching-a-part-to-offers) means by a wrong auto-match
+surfacing before it reaches an order. Note that `klm refresh` never *stores* a low-confidence
+match in the first place — P007 catches links that were downgraded or entered by other means.
 
 ### Project (`R`)
 
@@ -172,8 +193,8 @@ klm lint --format json                     # machine-readable, for CI
 klm lint --max-severity warning            # exit non-zero on warnings too
 ```
 
-`--select` and `--ignore` take rule IDs or group letters; `--ignore` wins. The `P` group needs
-supplier data and the `R` group needs project sync, so both arrive with those phases.
+`--select` and `--ignore` take rule IDs or group letters; `--ignore` wins. The `R` group needs
+project sync, so it arrives with phase 4.
 
 Fixes are written to the **stored assets**, never to `generated/` — the generated library is
 rebuilt from the catalog, so a fix written there would survive until the next `klm generate`.
