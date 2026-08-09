@@ -10,8 +10,10 @@ git mirror, library generation and KiCad registration, the field schema, value n
 / `klm offers`, lint group P), the asset pipeline (packages, symbol templates, chip land patterns,
 KiCad standard-library reuse, the QA gate, FreeCAD mesh→STEP, `klm part add`, `klm assets *`), and
 library sync (`klm vendor` / `unvendor`, the lock file, `klm sync status|pull|push|resolve|adopt`,
-`klm promote`). **Q1 and Q2 are resolved; Q4 was checked, is still open, and no longer blocks
-Phase 4** (see below). Phase 5 (fabrication) is next; **Q3 blocks part of it**.
+`klm promote`), and fabrication output (`klm bom`, `klm fab`, preflight, fab profiles, the rotation
+correction table and `klm fab feedback`). **Q1, Q2 and Q3 are resolved; Q4 was checked and is still
+open, but no longer blocks anything shipped.** Phase 6 (repository scaffolding and CI) is next;
+**Q11 — KiCad in CI — should be checked before starting it.**
 
 - `README.md` — entry point and documentation map
 - `docs/01`–`docs/15` — the design, one concern per document
@@ -123,6 +125,18 @@ These are the things that will bite an implementer who hasn't read the docs.
   dozens and aborting would push every user to `--allow-unresolved`. The consequence is that
   `klm vendor` does *not* establish self-containment — `klm verify --clean-room` does. See
   `docs/adr/0010`.
+- **klm bundles no pick-and-place rotation data, on purpose.** The community table is GPL-3.0 and
+  keyed by footprint name, but the correct orientation belongs to the part's reel — two parts on
+  one 0603 land pattern can differ. Corrections are recorded **per part** and learned from boards
+  that came back. See `docs/adr/0011`. Do not add a bundled table.
+- **`klm bom` must not need KiCad or a catalog.** It reads `.kicad_sch` directly so CI, the
+  clean-room check and cost estimates all work without `kicad-cli`. Everything else in the fab
+  pipeline does shell out, because gerbers need KiCad's own plotter.
+- **The fab manifest records a `klm_id` for every placement.** `klm fab feedback` maps a reference
+  back to a part from there, not from the schematic — by the time a board returns, the schematic
+  has usually moved on.
+- **A fab package is written only if preflight passed.** A package that exists is one somebody will
+  upload, so a half-checked one is worse than none. `--check` is the same code path, writing nothing.
 - **`klm verify --clean-room` must run with no catalog and no configuration.** It is a separate
   code path from `klm lint` (which assumes the catalog), because its whole job is to behave like a
   stranger's machine. Self-containment is defined by that check passing in CI, not by the project
@@ -131,8 +145,9 @@ These are the things that will bite an implementer who hasn't read the docs.
 
 ## Before building anything
 
-`docs/14-open-questions.md` is the risk register. Q1 and Q2 are resolved (2026-08-09); Q3–Q6
-remain. **Q3 (JLCPCB rotation correction data) is the one to check before starting Phase 5.**
+`docs/14-open-questions.md` is the risk register. Q1, Q2 and Q3 are resolved (2026-08-09). **Q11
+(KiCad in CI — container, headless rendering, gerber determinism) is the one to check before
+starting Phase 6**, and it is the phase that finally exercises `kicad-cli` for real.
 
 - **Q1 — resolved.** TME's auth is signature-based, not OAuth: HMAC-SHA1 over
   `POST&<enc URL>&<enc sorted query>`, base64, sent as `ApiSignature`. Still unverified: published

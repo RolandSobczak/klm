@@ -153,17 +153,24 @@ def lint_catalog(
     selector: Selector | None = None,
     fix: bool = False,
     dry_run: bool = False,
+    only: set[str] | None = None,
 ) -> LintReport:
-    """Check every part in the catalog.
+    """Check every part in the catalog, or only the ones named by ``only``.
 
     With ``fix``, mechanical findings are resolved and the affected assets
     re-stored; ``dry_run`` reports what would be fixed and writes nothing. The
     two share one code path, so what is printed is what would happen.
+
+    ``only`` exists for ``klm fab``, which must block on problems in the parts
+    *this board uses* and has no business failing a fab run because an unrelated
+    draft in the catalog is missing a datasheet.
     """
     active = selector or Selector()
     report = LintReport()
 
     for part in list_parts(conn):
+        if only is not None and part.klm_id not in only:
+            continue
         report.parts_checked += 1
         _lint_part(conn, store, config, active, part, report, fix=fix, dry_run=dry_run)
 

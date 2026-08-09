@@ -13,7 +13,13 @@ from dataclasses import dataclass
 from klm.kicad.schematic import split_lib_id
 from klm.kicad.sexpr import Atom, Document, SExp
 
-__all__ = ["FootprintInstance", "iter_footprints", "rewrite_footprint_ids"]
+__all__ = [
+    "FootprintInstance",
+    "footprint_nodes",
+    "footprint_reference",
+    "iter_footprints",
+    "rewrite_footprint_ids",
+]
 
 
 @dataclass(frozen=True)
@@ -30,7 +36,7 @@ class FootprintInstance:
         return split_lib_id(self.lib_id)[1]
 
 
-def _footprint_nodes(doc: Document | SExp) -> list[SExp]:
+def footprint_nodes(doc: Document | SExp) -> list[SExp]:
     """Top-level footprints. ``module`` is the pre-6.0 spelling of the same node."""
     root = doc.root if isinstance(doc, Document) else doc
     return [
@@ -40,7 +46,7 @@ def _footprint_nodes(doc: Document | SExp) -> list[SExp]:
     ]
 
 
-def _reference(node: SExp) -> str:
+def footprint_reference(node: SExp) -> str:
     """The reference designator, from either the property or the legacy text node."""
     for child in node.children:
         if not isinstance(child, SExp):
@@ -58,18 +64,18 @@ def _reference(node: SExp) -> str:
 
 def iter_footprints(doc: Document | SExp) -> list[FootprintInstance]:
     instances: list[FootprintInstance] = []
-    for node in _footprint_nodes(doc):
+    for node in footprint_nodes(doc):
         name = node[1]
         if not isinstance(name, Atom):
             continue
-        instances.append(FootprintInstance(lib_id=name.value, reference=_reference(node)))
+        instances.append(FootprintInstance(lib_id=name.value, reference=footprint_reference(node)))
     return instances
 
 
 def rewrite_footprint_ids(doc: Document | SExp, mapping: dict[str, str]) -> int:
     """Point each footprint at its vendored equivalent. Returns the count changed."""
     changed = 0
-    for node in _footprint_nodes(doc):
+    for node in footprint_nodes(doc):
         target = node[1]
         if isinstance(target, Atom) and target.value in mapping:
             replacement = mapping[target.value]
