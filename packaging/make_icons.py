@@ -57,15 +57,28 @@ def square_source() -> object:
 
 
 def main() -> int:
+    # The source check comes first on purpose: with no artwork there is nothing
+    # to convert, so a checkout without it should not also need an imaging
+    # library installed to be told so.
+    if not SOURCE.is_file():
+        # Not an error, and this is the same judgement the spec and the Inno
+        # script already make: the icon is artwork, and absence degrades to the
+        # platform default rather than failing a release. Exiting non-zero here
+        # made a build that would have worked fine stop at the second step.
+        print(
+            f"no source image at {SOURCE.relative_to(ROOT)} — skipping.\n"
+            "  The build will use the platform's default icon.",
+            file=sys.stderr,
+        )
+        return 0
+
     try:
         import PIL  # noqa: F401
     except ModuleNotFoundError:
+        # A real error: there *is* artwork and the tool to convert it is absent,
+        # so the build would silently ship without an icon it was meant to have.
         print("this needs Pillow: pip install pillow", file=sys.stderr)
         return 2
-
-    if not SOURCE.is_file():
-        print(f"no source image at {SOURCE}", file=sys.stderr)
-        return 1
 
     square = square_source()
     square.save(ICO, format="ICO", sizes=SIZES)  # type: ignore[attr-defined]
