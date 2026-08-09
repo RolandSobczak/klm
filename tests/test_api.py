@@ -12,6 +12,8 @@ raising.
 
 from __future__ import annotations
 
+import re
+import sys
 from pathlib import Path
 
 import pytest
@@ -262,11 +264,51 @@ def test_the_ui_is_served(client) -> None:
 
 def test_the_ui_pulls_in_nothing_from_the_network() -> None:
     """A desktop app that needs a CDN is a desktop app that fails offline."""
-    static = Path(__file__).resolve().parents[1] / "src" / "klm" / "api" / "static"
-    for path in static.iterdir():
+    for path in _static_dir().iterdir():
+        if path.suffix not in (".html", ".css", ".js"):
+            continue  # images are bytes; there is no URL to find in them
         text = path.read_text(encoding="utf-8")
         assert "http://" not in text.replace("http://127.0.0.1", "")
         assert "https://" not in text
+
+
+#: The page is written to survive these being absent — the `<img>` removes
+#: itself on error and the browser falls through to the next `icon` link. Every
+#: other reference must resolve.
+OPTIONAL_ASSETS = {"logo.png"}
+
+
+def test_every_asset_the_page_asks_for_is_actually_there() -> None:
+    """A `src=` with no file behind it is a broken image nobody notices in review."""
+    static = _static_dir()
+    page = (static / "index.html").read_text(encoding="utf-8")
+    referenced = set(re.findall(r'(?:src|href)="/static/([^"]+)"', page))
+    missing = {
+        name
+        for name in referenced - OPTIONAL_ASSETS
+        if not (static / name).is_file()
+    }
+    assert not missing, f"index.html references {missing}, which are not installed"
+
+
+def test_an_optional_asset_is_referenced_in_a_way_that_tolerates_its_absence() -> None:
+    """Being on the optional list is a claim, and this is what checks it.
+
+    Without this, adding a name to `OPTIONAL_ASSETS` would be a way to silence
+    the test above rather than a statement about how the page is written.
+    """
+    page = (_static_dir() / "index.html").read_text(encoding="utf-8")
+    for name in OPTIONAL_ASSETS:
+        for line in page.splitlines():
+            if f"/static/{name}" not in line:
+                continue
+            assert "onerror" in line or "alternate icon" in line, (
+                f"{name} is listed as optional but {line.strip()!r} would break without it"
+            )
+
+
+def _static_dir() -> Path:
+    return Path(__file__).resolve().parents[1] / "src" / "klm" / "api" / "static"
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +495,82 @@ def _paths_of(client):  # type: ignore[no-untyped-def]
 def _drain_jobs(api) -> None:  # type: ignore[no-untyped-def]
     for job in api.get("/api/jobs").json():
         _settle(api, job["id"])
+
+
+# ---------------------------------------------------------------------------
+# The icon
+# ---------------------------------------------------------------------------
+
+
+def test_the_favicon_is_served(client) -> None:
+    """The tab mark is required — it is drawn in the repository, not generated."""
+    api, _paths, _conn = client
+    response = api.get("/static/favicon.svg")
+    assert response.status_code == 200
+    assert "svg" in response.headers["content-type"]
+
+
+def test_the_application_icon_is_optional(monkeypatch, tmp_path: Path) -> None:
+    """`logo.png` is artwork, and absence degrades rather than fails.
+
+    The page falls back to its text heading (`onerror` on the `<img>`), the
+    window opens with the platform's default icon, and `make_icons.py` says
+    what is missing instead of producing a broken `.ico`. That is the same rule
+    `kicad-cli` and `freecadcmd` follow, applied to a picture.
+    """
+    from klm.api import server
+
+    monkeypatch.setattr(server, "LOGO", tmp_path / "nothing.png")
+    assert server.logo_path() is None
+
+
+def test_the_window_passes_the_icon_when_there_is_one(monkeypatch, tmp_path: Path) -> None:
+    from klm.api import desktop, server
+
+    icon = tmp_path / "logo.png"
+    icon.write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(server, "LOGO", icon)
+
+    started: dict[str, object] = {}
+    fake = type(
+        "FakeWebview",
+        (),
+        {
+            "create_window": staticmethod(lambda *a, **k: None),
+            "start": staticmethod(lambda **k: started.update(k)),
+        },
+    )
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    stub = type("Server", (), {"run": lambda self: None})
+    monkeypatch.setattr(desktop, "_serve", lambda app, port: stub())
+    monkeypatch.setattr(desktop, "_await_server", lambda port: None)
+    monkeypatch.setattr("klm.api.server.create_app", lambda catalog: object())
+
+    desktop.run_window(port=8999)
+    assert started["icon"] == str(icon)
+
+
+def test_the_window_opens_without_one(monkeypatch, tmp_path: Path) -> None:
+    from klm.api import desktop, server
+
+    monkeypatch.setattr(server, "LOGO", tmp_path / "nothing.png")
+    started: dict[str, object] = {}
+    fake = type(
+        "FakeWebview",
+        (),
+        {
+            "create_window": staticmethod(lambda *a, **k: None),
+            "start": staticmethod(lambda **k: started.update(k)),
+        },
+    )
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    stub = type("Server", (), {"run": lambda self: None})
+    monkeypatch.setattr(desktop, "_serve", lambda app, port: stub())
+    monkeypatch.setattr(desktop, "_await_server", lambda port: None)
+    monkeypatch.setattr("klm.api.server.create_app", lambda catalog: object())
+
+    desktop.run_window(port=8999)
+    assert started["icon"] is None
 
 
 # ---------------------------------------------------------------------------

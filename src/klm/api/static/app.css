@@ -8,8 +8,10 @@
 * { box-sizing: border-box; }
 body { margin:0; background:var(--bg); color:var(--text);
   font:14px/1.5 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif; }
-header { display:flex; align-items:center; gap:1.5rem; padding:.6rem 1rem;
+header { display:flex; align-items:center; gap:.7rem; padding:.6rem 1rem;
   border-bottom:1px solid var(--line); background:var(--panel); position:sticky; top:0; z-index:5; }
+#logo { width:1.6rem; height:1.6rem; border-radius:5px; flex:none; }
+header nav { margin-left:.8rem; }
 h1 { font-size:1rem; margin:0; letter-spacing:.06em; text-transform:uppercase; color:var(--muted); }
 nav button { background:none; border:0; color:var(--muted); padding:.4rem .7rem; cursor:pointer;
   border-radius:6px; font-size:.95rem; }

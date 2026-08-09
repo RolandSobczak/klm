@@ -3,8 +3,40 @@
 A desktop application for hobby and study PCB projects that turns "find a part, draw it,
 buy it, fab it" from a day of manual work into a reviewed, mostly-automatic pipeline.
 
-**Status: design phase.** No code yet. This repository currently contains the design
-documentation. Read [`docs/01-vision-and-problems.md`](docs/01-vision-and-problems.md) first.
+**Status: phases 0–8 built** — the catalog, field schema and linter, TME/LCSC sourcing, the asset
+pipeline, library sync, fabrication output, repository scaffolding and CI, ordering and inventory,
+and the desktop app. The AI research agent (phase 9) is next. See
+[`docs/13-roadmap.md`](docs/13-roadmap.md) for what that means in detail, and read
+[`docs/01-vision-and-problems.md`](docs/01-vision-and-problems.md) first for why any of it exists.
+
+## Install
+
+Every release carries a build for all three platforms —
+[Releases](https://github.com/RolandSobczak/klm/releases):
+
+| Platform | Download | Then |
+|---|---|---|
+| Windows | `klm-setup-<v>.exe` | Run it. Next, next, next — no administrator needed |
+| macOS | `klm-<v>-macos.zip` | Unzip, drag `klm.app` to Applications |
+| Linux | `klm-<v>-linux-x86_64.tar.gz` | Unpack, run `klm/klm-app` |
+| Any | — | `pip install 'klm[app]'`, or `pipx install klm` for the CLI alone |
+
+Nothing is code-signed yet, so the first launch needs one extra click: on Windows, SmartScreen's
+*More info* → *Run anyway*; on macOS, right-click → *Open* instead of double-clicking. Both need
+paid certificates to fix, and `packaging/README.md` says what that would take.
+
+Then:
+
+```bash
+klm init
+klm app     # native window; `klm serve` gives a URL instead
+```
+
+On Linux the window needs WebKitGTK (`apt install gir1.2-webkit2-4.1`). Without it `klm app` says
+so and falls back to serving a URL, which is also what to use over SSH or in a container.
+
+Everything the window does, the CLI does — that is a rule, not a coincidence: *if the GUI can do
+something the CLI cannot, that is a bug in the CLI.*
 
 ## The problem, in one paragraph
 

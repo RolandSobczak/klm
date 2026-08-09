@@ -87,9 +87,16 @@ def run_window(
     threading.Thread(target=server.run, name="klm-api", daemon=True).start()
     _await_server(chosen)
 
+    from klm.api.server import logo_path
+
     try:
         webview.create_window(title, f"http://{HOST}:{chosen}", width=1180, height=780)
-        webview.start()
+        # pywebview honours `icon` on GTK and Qt; Windows and macOS take the
+        # icon from the bundle instead and ignore it. Passing it unconditionally
+        # is right either way — and `None` is what an uninstalled asset gives,
+        # which is the same as not passing it.
+        icon = logo_path()
+        webview.start(icon=str(icon) if icon else None)
     except Exception as exc:
         # On Linux this is usually a missing WebKitGTK. Naming the fallback is
         # more useful than naming the exception.

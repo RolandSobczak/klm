@@ -147,6 +147,16 @@ These are the things that will bite an implementer who hasn't read the docs.
 - **The desktop shell is pywebview, not Tauri** (`docs/adr/0012` supersedes `0005`). One wheel, three
   platforms, no Rust or npm. `klm app` opens a window; a machine with no usable webview degrades to
   `klm serve` rather than raising.
+- **Releases are built on runners, never locally.** PyInstaller does not cross-compile — it
+  packages the interpreter's own binaries — so `.github/workflows/release.yml` runs one job per
+  platform. It starts the frozen server and fetches `/api/health` and `/static/app.js` before
+  packaging, because **uvicorn resolves its protocol implementations by name**: a build with a
+  missing hidden import starts fine and dies on the first request, which no import check finds.
+- **`klm doctor` exits 1 when a tool is missing**, by design (0 ok, 1 check failed, 2 klm errored).
+  CI smoke tests must tolerate 1 and fail only on ≥2, or the release job is red on every run.
+- **`packaging/klm.ico` is generated, not committed.** One source image
+  (`api/static/logo.png`); `make_icons.py` derives the rest. The tab favicon is a *separate,
+  hand-drawn* `static/favicon.svg` — at 16 px the detailed artwork averages to a green square.
 - **A job's terminal state is assigned last.** A watcher stops as soon as it sees `done`/`failed`,
   so setting the state before recording the traceback lets it stop mid-write.
 - **Previews are rendered by klm, not `kicad-cli`.** `kicad/render.py` draws symbols and

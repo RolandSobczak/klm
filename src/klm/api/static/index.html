@@ -1,8 +1,17 @@
 <!doctype html>
 <meta charset="utf-8">
 <title>klm</title>
+<!-- The simplified mark for the tab, the full artwork as the fallback: at 16px
+     the detailed board averages to a green square. Browsers that understand SVG
+     take the first line and ignore the second. -->
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<link rel="alternate icon" href="/static/logo.png">
 <link rel="stylesheet" href="/static/app.css">
 <header>
+  <!-- The heading is the text, always. The mark sits beside it and is hidden if
+       the asset is not installed, so a stripped checkout shows a title rather
+       than a broken-image glyph. -->
+  <img id="logo" src="/static/logo.png" alt="" onerror="this.remove()">
   <h1>klm</h1>
   <nav id="tabs">
     <button data-view="catalog" class="on">Catalog</button>

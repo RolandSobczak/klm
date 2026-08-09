@@ -44,9 +44,24 @@ from klm.services.vendor import VendorError, unvendor, vendor
 from klm.services.verify import verify_clean_room
 from klm.store import AssetKind, AssetStore, Paths, connect
 
-__all__ = ["STATIC_DIR", "create_app"]
+__all__ = ["LOGO", "STATIC_DIR", "create_app", "logo_path"]
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+
+#: The application icon: browser tab, window header, and the native window's
+#: own icon. One file in one place — the UI, the window and the wheel all read
+#: it from here rather than each carrying a copy at a different size.
+LOGO = STATIC_DIR / "logo.png"
+
+
+def logo_path() -> Path | None:
+    """The icon, or ``None`` if it is not installed.
+
+    Absent is a normal state, not a failure: a source checkout without the
+    asset, or a stripped wheel, still runs. The window opens with the
+    platform's default icon and the page falls back to a text heading.
+    """
+    return LOGO if LOGO.is_file() else None
 
 
 def _json(value: Any) -> Any:

@@ -236,15 +236,32 @@ diff invites someone to resolve a conflict that is not there.
 
 ## 5. Packaging
 
-| Target | Approach |
-|---|---|
-| All three | `pip install 'klm[app]'`, then `klm app`. One wheel; the webview is the platform's own |
-| Linux | Needs WebKitGTK (`gir1.2-webkit2-4.1`). Absent, `klm app` degrades to `klm serve` and says why |
-| CLI alone | `pipx install klm` — the core has no runtime dependencies at all |
+| Target | Artifact | Notes |
+|---|---|---|
+| Windows | `klm-setup-<v>.exe` | Inno Setup wizard, per-user, no UAC. Installs the app *and* the CLI |
+| macOS | `klm-<v>-macos.zip` | A `.app` bundle; the CLI is inside it |
+| Linux | `klm-<v>-linux-x86_64.tar.gz` | Glibc-bound; `pip` is the better route on Linux |
+| Any | wheel / sdist | `pip install 'klm[app]'`, or `pipx install klm` for the CLI alone |
+| Linux window | — | Needs WebKitGTK. Absent, `klm app` degrades to `klm serve` and says why |
 
-External tools (`kicad-cli`, `freecadcmd`) are **not** bundled — they're large and already
-installed by anyone who needs them. `klm doctor` reports what's missing and what each missing
-tool disables:
+Downloadable builds exist because "install Python, then `pip install`" is not an
+installation instruction for the person this tool is for. ADR-0012 dropped Tauri
+and with it the MSI ADR-0005 had assumed; PyInstaller replaces it, one job per
+platform because **PyInstaller does not cross-compile**. Every artifact carries
+the CLI as well as the window — shipping only the window would make "if the GUI
+can do something the CLI cannot, that is a bug in the CLI" unenforceable for
+anyone who installed the easy way.
+
+Three consequences worth stating plainly, all in `packaging/README.md`: nothing
+is **code-signed**, so Windows shows a SmartScreen warning and macOS Gatekeeper
+refuses the bundle until certificates are bought; the native Windows window
+needs Microsoft's **WebView2 runtime**, which the installer offers to fetch but
+never requires; and the smoke test in CI tolerates `klm doctor` exiting 1,
+because a runner has no KiCad and 1 is what "a check failed" means.
+
+External tools (`kicad-cli`, `freecadcmd`) are **not** bundled in any of them — they're large and
+already installed by anyone who needs them. `klm doctor` reports what's missing and what each
+missing tool disables:
 
 ```
 $ klm doctor

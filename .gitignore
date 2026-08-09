@@ -21,6 +21,11 @@ htmlcov/
 /generated/
 /cache/
 
+# Generated from src/klm/api/static/logo.png by packaging/make_icons.py.
+# Committing it too would give two files that are meant to be the same picture
+# and nothing that notices when they stop being it.
+/packaging/klm.ico
+
 # Editors / OS
 .idea/
 *.swp
