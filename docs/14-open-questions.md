@@ -196,20 +196,31 @@ losslessly. If one does, use it; the requirement is the guarantee, not the autho
 
 ---
 
-## Q8 — VAT, customs and import charge modelling
+## Q8 — VAT, customs and import charge modelling — **RESOLVED** (2026-08-09)
 
-**Blocks:** Phase 6
+**Blocked:** Phase 7 · **Answer:** the design position was right, and the rates moved this year.
 
-Landed-cost comparison between a domestic PLN supplier and an imported USD one requires modelling
-import VAT and any applicable duty. Rates, thresholds and collection mechanisms change, and
-getting them wrong produces confidently incorrect financial figures.
+Landed-cost comparison between a domestic PLN supplier and an imported USD one needs import VAT
+and duty modelled. Checking the current state found that **the rules changed six weeks ago**, which
+is the best possible argument for the position this entry already took:
 
-**Design position:** all rates and thresholds are **configuration**, never code. Every computed
-total is labelled an estimate, with its assumptions listed. klm does not present tax figures as
-authoritative, and the user is expected to set the values that apply to them.
+- **The €150 customs-duty exemption ended on 1 July 2026.** A fixed **€3 duty per item** now applies
+  to consignments below €150, as an interim measure until the EU Customs Data Hub arrives around
+  mid-2028. It is levied per commodity code, not per parcel.
+- **Import VAT has had no de-minimis since July 2021** — every import is taxable, at the
+  destination rate. Poland is 23%.
+- **A Union-wide customs handling fee is expected from November 2026**, small and per declaration
+  line. Not in force at the time of writing, so klm's default for it is zero.
 
-**To verify:** current rates and thresholds at implementation time, and how they're actually
-collected in practice for the order sizes involved.
+Anything hardcoded in June would have been wrong in July. So: **every rate and threshold is
+configuration** (`[suppliers.<name>]` in `config.toml`), klm ships current defaults as *data*, and
+every computed total is labelled an estimate with its assumptions listed beside it. `klm order plan`
+prints the assumptions it used; a figure a user cannot audit is a figure they should not spend money
+against.
+
+**klm does not present tax figures as authoritative and never will.** The numbers are there to
+answer "is TME or LCSC cheaper for this cart", which they do robustly, because the comparison
+survives being somewhat wrong in the same direction on both sides.
 
 ---
 

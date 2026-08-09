@@ -228,10 +228,33 @@ CREATE TABLE part_rotation_correction (
 """
 
 
+# Phase 7 additions. `purchase_line` gains what receiving actually needs: a
+# reference back to the offer, and somewhere to record a discrepancy rather than
+# silently reconciling it (docs/10 §5). A supplier pin is a user decision that
+# must survive re-planning, and a reorder threshold is per part.
+_ORDERING = """
+ALTER TABLE purchase_line ADD COLUMN supplier TEXT;
+ALTER TABLE purchase_line ADD COLUMN klm_id_note TEXT;
+ALTER TABLE purchase_line ADD COLUMN discrepancy TEXT;
+
+CREATE TABLE supplier_pin (
+    klm_id   TEXT PRIMARY KEY REFERENCES part(klm_id) ON DELETE CASCADE,
+    supplier TEXT NOT NULL,
+    note     TEXT
+);
+
+CREATE TABLE reorder_threshold (
+    klm_id    TEXT PRIMARY KEY REFERENCES part(klm_id) ON DELETE CASCADE,
+    threshold INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "initial schema", _INITIAL),
     Migration(2, "offer provenance columns", _OFFER_PROVENANCE),
     Migration(3, "per-part rotation corrections", _PART_ROTATION),
+    Migration(4, "ordering: pins, thresholds, line provenance", _ORDERING),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1].version

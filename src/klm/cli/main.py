@@ -37,11 +37,13 @@ from klm.services.assets import (
 from klm.services.bom import BomReport, Variant, extract_bom, load_variants
 from klm.services.catalog import get_part, list_parts, save_part
 from klm.services.corrections import delete_pattern, list_patterns, part_corrections, set_pattern
+from klm.services.demand import DemandLine, SparesPolicy, parse_build_plan, plan_demand
 from klm.services.docs import build_docs, github_summary, json_report
 from klm.services.exporter import PART_FILE, export_catalog, import_catalog
 from klm.services.fab import fab_feedback, fab_package
 from klm.services.generate import generate
 from klm.services.importer import import_symbol_library
+from klm.services.labels import labels_for_parts, render_png, resolve_short_id, write_pdf
 from klm.services.lint import RULES, LintReport, Selector, Severity, lint_catalog
 from klm.services.offers import (
     TIMESTAMP_FORMAT,
@@ -51,9 +53,30 @@ from klm.services.offers import (
     save_offer,
     stale_part_ids,
 )
+from klm.services.orders import (
+    STATES,
+    cart_summary,
+    create_order,
+    export_cart,
+    get_order,
+    list_orders,
+    mark_placed,
+    pin_supplier,
+    pins,
+    receive,
+)
 from klm.services.part_add import add_part
 from klm.services.register import apply_plan, plan_registration
 from klm.services.scaffold import KICAD_IMAGE, apply_scaffold, plan_scaffold
+from klm.services.split import Assignment, split_order
+from klm.services.stock import (
+    adjust,
+    consume,
+    list_stock,
+    low_stock,
+    set_threshold,
+    where,
+)
 from klm.services.sync import (
     SyncReport,
     SyncRow,
@@ -253,8 +276,95 @@ def build_parser() -> argparse.ArgumentParser:
     _add_sync_parsers(sub)
     _add_fab_parsers(sub)
     _add_repo_parsers(sub)
+    _add_ordering_parsers(sub)
 
     return parser
+
+
+def _add_ordering_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    order = sub.add_parser("order", help="Plan, export, place and receive supplier orders.")
+    actions = order.add_subparsers(dest="action", metavar="ACTION", required=True)
+
+    plan = actions.add_parser("plan", help="Build plan to per-supplier carts.")
+    plan.add_argument("--build", required=True, metavar="PLAN", help="e.g. 5xsensor-board:full")
+    plan.add_argument("--projects", metavar="DIR", default=".", help="Where the projects live.")
+    plan.add_argument("--explain", action="store_true", help="Justify every quantity.")
+    plan.add_argument("--no-stock", action="store_true", help="Ignore what is on hand.")
+    plan.add_argument("--save", action="store_true", help="Record draft orders in the catalog.")
+    plan.set_defaults(func=cmd_order_plan)
+
+    export = actions.add_parser("export", help="Write a cart file for one supplier.")
+    export.add_argument("supplier")
+    export.add_argument("--order", metavar="ID", help="An existing order, instead of a new plan.")
+    export.add_argument("--output", metavar="DIR", default=".")
+    export.set_defaults(func=cmd_order_export)
+
+    show = actions.add_parser("list", help="Orders and their state.")
+    show.add_argument("--state", choices=STATES)
+    show.set_defaults(func=cmd_order_list)
+
+    placed = actions.add_parser("mark-placed", help="Record that a cart was submitted.")
+    placed.add_argument("order_id", metavar="ID")
+    placed.add_argument("--total", type=float, help="What it actually cost.")
+    placed.set_defaults(func=cmd_order_mark_placed)
+
+    receiving = actions.add_parser("receive", help="Book a delivery in and stock it.")
+    receiving.add_argument("order_id", metavar="ID")
+    receiving.add_argument("--location", default="unfiled")
+    receiving.add_argument(
+        "--partial", metavar="PN:QTY", action="append", default=[], help="Repeatable."
+    )
+    receiving.set_defaults(func=cmd_order_receive)
+
+    pin = actions.add_parser("pin", help="Force a part to one supplier. Absolute.")
+    pin.add_argument("part", metavar="ID_OR_MPN")
+    pin.add_argument("--supplier", help="Omit to remove the pin.")
+    pin.set_defaults(func=cmd_order_pin)
+
+    stock = sub.add_parser("stock", help="What is on the bench, and where.")
+    stock_actions = stock.add_subparsers(dest="action", metavar="ACTION", required=True)
+
+    listing = stock_actions.add_parser("list", help="Everything on hand.")
+    listing.add_argument("--location", metavar="GLOB")
+    listing.add_argument("--low", action="store_true", help="Only parts below their threshold.")
+    listing.set_defaults(func=cmd_stock_list)
+
+    adjusting = stock_actions.add_parser("adjust", help="Record a physical count.")
+    adjusting.add_argument("part", metavar="ID_OR_MPN")
+    adjusting.add_argument("--location", required=True)
+    adjusting.add_argument("--set", dest="set_to", type=int)
+    adjusting.add_argument("--delta", type=int, default=0)
+    adjusting.set_defaults(func=cmd_stock_adjust)
+
+    finding = stock_actions.add_parser("where", help="Where did I put those?")
+    finding.add_argument("part", metavar="ID_OR_MPN")
+    finding.set_defaults(func=cmd_stock_where)
+
+    consuming = stock_actions.add_parser("consume", help="Decrement after building.")
+    consuming.add_argument("--build", required=True, metavar="PLAN")
+    consuming.add_argument("--projects", metavar="DIR", default=".")
+    consuming.set_defaults(func=cmd_stock_consume)
+
+    threshold = stock_actions.add_parser("threshold", help="Set a reorder threshold.")
+    threshold.add_argument("part", metavar="ID_OR_MPN")
+    threshold.add_argument("count", type=int)
+    threshold.set_defaults(func=cmd_stock_threshold)
+
+    labels = sub.add_parser("labels", help="Drawer labels, as a PDF sheet or PNGs.")
+    label_actions = labels.add_subparsers(dest="action", metavar="ACTION", required=True)
+
+    printing = label_actions.add_parser("print", help="Write labels.")
+    printing.add_argument("--order", metavar="ID", help="Everything that just arrived.")
+    printing.add_argument("--location", metavar="GLOB")
+    printing.add_argument("--part", metavar="ID_OR_MPN", action="append", default=[])
+    printing.add_argument("--output", metavar="PATH", default="labels.pdf")
+    printing.add_argument("--format", choices=("pdf", "png"), default="pdf")
+    printing.add_argument("--dpi", type=int, default=300)
+    printing.set_defaults(func=cmd_labels_print)
+
+    scanning = label_actions.add_parser("scan", help="Resolve a short ID from a drawer.")
+    scanning.add_argument("short")
+    scanning.set_defaults(func=cmd_labels_scan)
 
 
 def _add_repo_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -2179,6 +2289,333 @@ def cmd_report(args: argparse.Namespace) -> int:
         if conn is not None:
             conn.close()
     return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# order / stock / labels
+# ---------------------------------------------------------------------------
+
+
+def _spares_policy(config: Config, paths: Paths) -> SparesPolicy:
+    if not paths.config.is_file():
+        return SparesPolicy()
+    with open(paths.config, "rb") as handle:
+        raw = tomllib.load(handle)
+    return SparesPolicy.from_config(dict(raw.get("spares") or {}))
+
+
+def _plan(args: argparse.Namespace, paths: Paths, conn: sqlite3.Connection):  # type: ignore[no-untyped-def]
+    builds = parse_build_plan(args.build)
+    return plan_demand(
+        conn,
+        builds,
+        projects_root=args.projects,
+        policy=_spares_policy(load_config(paths.config), paths),
+        use_stock=not getattr(args, "no_stock", False),
+    )
+
+
+def cmd_order_plan(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    config = load_config(paths.config)
+    conn = connect(paths.db, create=False)
+    try:
+        demand = _plan(args, paths, conn)
+        result = split_order(demand.orderable, config, pins=pins(conn))
+
+        for project, references in sorted(demand.unresolved.items()):
+            print(f"{_WARN} {project}: {len(references)} reference(s) with no catalog part")
+
+        for assignment in result.assignments:
+            line = assignment.line
+            price = f"{assignment.subtotal:8.2f}" if assignment.unit_price else "       ?"
+            print(
+                f"  {assignment.quantity:>5} x {line.mpn:<26} {assignment.supplier:<6}"
+                f" {price}  [{assignment.reason}]"
+            )
+            if args.explain:
+                for note in line.explain():
+                    print(f"          {note}")
+                for name, delta, note in assignment.alternatives:
+                    extra = f"{delta:+.2f}"
+                    print(f"          alt {name}: {extra}{'  ' + note if note else ''}")
+
+        for line in result.unsourced:
+            print(f"{_WARN} {line.mpn}: no enabled supplier stocks {line.order_qty}")
+
+        print()
+        for supplier in sorted(result.carts):
+            for row in cart_summary(result, supplier):
+                print(row)
+        print(f"\n  grand total {result.total:.2f}   (estimate — see the assumptions above)")
+        for improvement in result.improvements:
+            print(f"{_INFO} {improvement}")
+
+        if args.save:
+            for supplier in sorted(result.carts):
+                order = create_order(
+                    conn,
+                    supplier,
+                    result.for_supplier(supplier),
+                    currency=config.suppliers[supplier].currency
+                    if supplier in config.suppliers
+                    else None,
+                )
+                print(f"{_OK} saved draft order {order.id}")
+    finally:
+        conn.close()
+    return EXIT_CHECK_FAILED if result.unsourced else EXIT_OK
+
+
+def cmd_order_export(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        if not args.order:
+            raise SystemExit("klm: --order ID is required; run `klm order plan --save` first")
+        order = get_order(conn, args.order)
+        if order is None:
+            raise SystemExit(f"klm: no order {args.order!r}")
+        assignments = [
+            Assignment(
+                line=DemandLine(klm_id=line.klm_id, part=get_part(conn, line.klm_id)),
+                supplier=order.supplier,
+                offer=Offer(supplier=order.supplier, supplier_pn=line.supplier_pn),
+                quantity=line.qty_ordered,
+                unit_price=line.unit_price,
+            )
+            for line in order.lines
+        ]
+        name, body = export_cart(conn, args.supplier, assignments)
+        target = Path(args.output) / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8", newline="")
+        print(f"{_OK} {target}  ({len(order.lines)} line(s))")
+        print(f"{_INFO} klm does not place orders — review it, then submit it yourself")
+    finally:
+        conn.close()
+    return EXIT_OK
+
+
+def cmd_order_list(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        orders = list_orders(conn, state=args.state)
+        for order in orders:
+            print(
+                f"  {order.id:<28} {order.state:<20} {len(order.lines):>3} line(s)"
+                f"  {order.estimated:8.2f} {order.currency or ''}"
+            )
+        if not orders:
+            print(f"{_INFO} no orders yet")
+    finally:
+        conn.close()
+    return EXIT_OK
+
+
+def cmd_order_mark_placed(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        order = mark_placed(conn, args.order_id, total=args.total)
+        print(f"{_OK} {order.id} is {order.state}")
+    finally:
+        conn.close()
+    return EXIT_OK
+
+
+def cmd_order_receive(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    partial: dict[str, int] | None = None
+    if args.partial:
+        partial = {}
+        for item in args.partial:
+            pn, _, count = item.partition(":")
+            try:
+                partial[pn.strip()] = int(count)
+            except ValueError:
+                raise SystemExit(f"klm: --partial wants PN:QTY, got {item!r}") from None
+
+    conn = connect(paths.db, create=False)
+    try:
+        report = receive(conn, args.order_id, location=args.location, partial=partial)
+        for klm_id, location, quantity in report.stocked:
+            part = get_part(conn, klm_id)
+            print(f"{_OK} +{quantity:<5} {(part.mpn if part else klm_id):<26} → {location}")
+        for pn, note in report.discrepancies:
+            print(f"{_WARN} {pn}: {note}")
+        print(f"\n{_OK} {report.order.id} is {report.order.state}")
+        print(f"{_INFO} next: klm labels print --order {report.order.id}")
+    finally:
+        conn.close()
+    return EXIT_OK
+
+
+def cmd_order_pin(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        part = _resolve_part(conn, args.part)
+        pin_supplier(conn, part.klm_id, args.supplier)
+        if args.supplier:
+            print(f"{_OK} {part.mpn} pinned to {args.supplier} — this overrides cost")
+        else:
+            print(f"{_OK} {part.mpn} unpinned")
+    finally:
+        conn.close()
+    return EXIT_OK
+
+
+def cmd_stock_list(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        if args.low:
+            rows = low_stock(conn)
+            for item, threshold in rows:
+                print(f"{_WARN} {item.mpn:<26} {item.quantity:>6} < {threshold}")
+            if not rows:
+                print(f"{_OK} nothing below its reorder threshold")
+            return EXIT_CHECK_FAILED if rows else EXIT_OK
+        items = [i for i in list_stock(conn, location=args.location) if i.quantity]
+        for item in items:
+            counted = item.last_counted or "never counted"
+            print(f"  {item.quantity:>6}  {item.mpn:<26} {item.location:<28} {counted}")
+        if not items:
+            print(f"{_INFO} nothing in stock")
+    finally:
+        conn.close()
+    return EXIT_OK
+
+
+def cmd_stock_adjust(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        part = _resolve_part(conn, args.part)
+        item = adjust(
+            conn, part.klm_id, args.location, set_to=args.set_to, delta=args.delta
+        )
+        print(f"{_OK} {part.mpn} @ {item.location}: {item.quantity}")
+    finally:
+        conn.close()
+    return EXIT_OK
+
+
+def cmd_stock_where(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        part = _resolve_part(conn, args.part)
+        found = where(conn, part.klm_id)
+        for item in found:
+            print(f"  {item.quantity:>6}  {item.location}")
+        if not found:
+            print(f"{_INFO} {part.mpn} is not recorded anywhere")
+    finally:
+        conn.close()
+    return EXIT_OK if found else EXIT_CHECK_FAILED
+
+
+def cmd_stock_consume(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        args.no_stock = True
+        demand = _plan(args, paths, conn)
+        taken, short = consume(conn, {line.klm_id: line.gross for line in demand.lines})
+        for klm_id, location, quantity in taken:
+            part = get_part(conn, klm_id)
+            print(f"{_OK} -{quantity:<5} {(part.mpn if part else klm_id):<26} from {location}")
+        for klm_id, missing in sorted(short.items()):
+            part = get_part(conn, klm_id)
+            print(f"{_WARN} short {missing} of {part.mpn if part else klm_id}")
+    finally:
+        conn.close()
+    return EXIT_CHECK_FAILED if short else EXIT_OK
+
+
+def cmd_stock_threshold(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        part = _resolve_part(conn, args.part)
+        set_threshold(conn, part.klm_id, args.count)
+        print(f"{_OK} {part.mpn} reorders below {args.count}")
+    finally:
+        conn.close()
+    return EXIT_OK
+
+
+def cmd_labels_print(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        klm_ids: list[str] = []
+        if args.order:
+            order = get_order(conn, args.order)
+            if order is None:
+                raise SystemExit(f"klm: no order {args.order!r}")
+            klm_ids += [line.klm_id for line in order.lines if line.qty_received]
+        if args.location:
+            klm_ids += [i.klm_id for i in list_stock(conn, location=args.location) if i.quantity]
+        for reference in args.part:
+            klm_ids.append(_resolve_part(conn, reference).klm_id)
+
+        seen: dict[str, None] = {}
+        for klm_id in klm_ids:
+            seen.setdefault(klm_id, None)
+        labels = labels_for_parts(conn, list(seen))
+        if not labels:
+            print(f"{_INFO} nothing to label — try --order, --location or --part")
+            return EXIT_CHECK_FAILED
+
+        target = Path(args.output)
+        if args.format == "png":
+            target.mkdir(parents=True, exist_ok=True)
+            for label in labels:
+                render_png(label, target / f"{label.short}.png", dpi=args.dpi)
+            print(f"{_OK} {len(labels)} PNG(s) in {target}")
+        else:
+            write_pdf(labels, target)
+            print(f"{_OK} {len(labels)} label(s) → {target}")
+        # Q6: no barcode until a scanner exists to prove one this small reads.
+        print(f"{_INFO} labels carry a short ID, not a Data Matrix — see docs/14 Q6")
+    finally:
+        conn.close()
+    return EXIT_OK
+
+
+def cmd_labels_scan(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        matches = resolve_short_id(conn, args.short)
+        for part in matches:
+            print(f"{_OK} {part.klm_id}  {part.mpn}  {part.description}")
+            for item in where(conn, part.klm_id):
+                print(f"      {item.quantity:>6} @ {item.location}")
+        if not matches:
+            print(f"{_FAIL} no part has the short ID {args.short!r}")
+        elif len(matches) > 1:
+            print(f"{_WARN} {len(matches)} parts share this short ID — reported, not guessed")
+    finally:
+        conn.close()
+    return EXIT_OK if len(matches) == 1 else EXIT_CHECK_FAILED
 
 
 if __name__ == "__main__":  # pragma: no cover
