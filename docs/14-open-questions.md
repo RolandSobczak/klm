@@ -83,20 +83,34 @@ ships with an empty table and learns from run one — slower, but the architectu
 
 ---
 
-## Q4 — Licensing of imported library assets
+## Q4 — Licensing of imported library assets — **still open**, and now load-bearing
 
-**Blocks:** Phase 3 (for the warning), Phase 4 (for publication)
+**Blocks:** Phase 3 (the EasyEDA importer), Phase 4 (for publication)
 
 Redistribution status of EasyEDA/LCSC-derived symbols, footprints and 3D models is unclear. This
 matters specifically because vendored projects are intended for GitHub.
 
-**To verify:** EasyEDA/LCSC terms regarding derived library assets; how comparable tools handle
-attribution; whether KiCad's library license exception covers derived works of this kind.
+**Checked, August 2026 — the finding is that there is no finding.** EasyEDA's terms grant a
+personal/internal-business licence to use the *service* and prohibit reselling it; user-contributed
+library content has no default licence, with an optional CC-BY-SA the uploader may choose; and
+nothing published addresses redistribution of vendor-supplied component assets specifically. Note
+also that `easyeda2kicad.py`, the reference implementation everyone points at, is **AGPL-3.0**,
+which would matter to anything that vendored its code.
 
-**If wrong:** klm may need to refuse to vendor certain assets into a repository marked for
-publication, or require explicit acknowledgement. The `license_note` field and
-`klm licenses --project .` already exist to make the question answerable; the policy on top of
-them is undecided.
+An absent answer is not a permissive one. Combined with
+[ADR-0009](adr/0009-lcsc-manual-first.md) — klm ships no client against unofficial endpoints, and
+the EasyEDA component API is exactly such an endpoint — this is why **Phase 3 shipped without the
+EasyEDA importer**. Two independent reasons pointed the same way, so the importer was not written
+rather than written and disabled.
+
+**To verify, if it is ever worth revisiting:** an explicit EasyEDA/LCSC statement on derived
+library assets; how comparable tools handle attribution; whether KiCad's library license exception
+covers derived works of this kind.
+
+**Consolation:** the sources klm does use — KiCad's own libraries and its own generators — have no
+such question. KiCad's libraries are permissively licensed with an explicit design-use exception,
+and klm records that on every asset it takes (`asset.license_note`), so `klm licenses --project .`
+will have something true to report when it arrives.
 
 **klm will not attempt to give legal advice.** It reports origin and flags uncertainty.
 

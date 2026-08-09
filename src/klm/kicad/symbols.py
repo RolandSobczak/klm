@@ -8,12 +8,15 @@ through untouched.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
-from klm.kicad.sexpr import Atom, Document, SExp
+from klm.kicad.sexpr import Atom, Document, Node, SExp
 
 __all__ = [
+    "PinInfo",
     "extract_symbols",
     "find_property",
+    "iter_pins",
     "iter_properties",
     "make_library",
     "properties",
@@ -189,3 +192,67 @@ def make_library(symbols: list[SExp], *, generator: str, version: str) -> SExp:
             *symbols,
         ]
     )
+
+
+@dataclass(frozen=True, slots=True)
+class PinInfo:
+    """One pin of a symbol, as the QA gate needs to see it."""
+
+    number: str
+    name: str
+    type: str
+    x: float
+    y: float
+    angle: float
+
+    def on_grid(self, grid: float = 1.27, tolerance: float = 1e-6) -> bool:
+        """Whether the pin's connection point lands on KiCad's schematic grid.
+
+        Off-grid pins are checked as an error rather than a nicety: a wire
+        cannot be attached to one without the user nudging the grid, and the
+        problem is invisible until someone tries.
+        """
+        return all(abs(v / grid - round(v / grid)) < tolerance for v in (self.x, self.y))
+
+
+def iter_pins(symbol: SExp) -> list[PinInfo]:
+    """Every pin of a symbol, including those inside its unit sub-symbols.
+
+    KiCad puts graphics in one sub-symbol and pins in another, so a search that
+    stops at the top level finds nothing on a well-formed symbol.
+    """
+    pins: list[PinInfo] = []
+    for node in symbol.find_all("pin"):
+        if len(node) < 2 or not isinstance(node[1], Atom):
+            continue
+        at = node.find("at", recursive=False)
+        coords = [_number(at[i]) for i in range(1, 4)] if at is not None and len(at) >= 3 else []
+        while len(coords) < 3:
+            coords.append(0.0)
+        pins.append(
+            PinInfo(
+                number=_sub_value(node, "number"),
+                name=_sub_value(node, "name"),
+                type=node[1].value if isinstance(node[1], Atom) else "unspecified",
+                x=coords[0],
+                y=coords[1],
+                angle=coords[2],
+            )
+        )
+    return pins
+
+
+def _sub_value(node: SExp, tag: str) -> str:
+    child = node.find(tag, recursive=False)
+    if child is not None and len(child) >= 2 and isinstance(child[1], Atom):
+        return child[1].value
+    return ""
+
+
+def _number(item: Node) -> float:
+    if isinstance(item, Atom):
+        try:
+            return float(item.value)
+        except ValueError:
+            return 0.0
+    return 0.0

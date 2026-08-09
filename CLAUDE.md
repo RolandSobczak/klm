@@ -4,11 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-Phases 0, 1 and 2 of `docs/13-roadmap.md` are implemented: file handling, the store, the catalog
-and its git mirror, library generation and KiCad registration, the field schema, value
-normalization, `klm lint` and the pre-commit hook, and the supplier layer — adapter protocol, TME,
-LCSC, offers, matching, `klm refresh` / `klm offers` and lint group P. **Q1 and Q2 are both
-resolved** (see below). Phase 3 (asset pipeline) is next.
+Phases 0–3 of `docs/13-roadmap.md` are implemented: file handling, the store, the catalog and its
+git mirror, library generation and KiCad registration, the field schema, value normalization,
+`klm lint` and the pre-commit hook, the supplier layer (TME, LCSC, offers, matching, `klm refresh`
+/ `klm offers`, lint group P), and the asset pipeline (packages, symbol templates, chip land
+patterns, KiCad standard-library reuse, the QA gate, FreeCAD mesh→STEP, `klm part add`,
+`klm assets *`). **Q1 and Q2 are resolved; Q4 was checked and is still open** (see below).
+Phase 4 (library sync) is next and nothing blocks it.
 
 - `README.md` — entry point and documentation map
 - `docs/01`–`docs/15` — the design, one concern per document
@@ -88,6 +90,18 @@ These are the things that will bite an implementer who hasn't read the docs.
   `2026-08-09T12:00:00Z`; SQLite's `datetime()` returns `2026-08-09 12:00:00`. Compared as strings
   those disagree wherever the dates are equal, because `T` sorts after a space. See
   `TIMESTAMP_FORMAT` in `services/offers.py`.
+- **klm generates chip land patterns and nothing else.** An 0402 is 1.0 x 0.5 mm by definition, so
+  its two rectangles are derivable. A fine-pitch QFN's are not; a reconstructed one would look
+  right, pass a visual check, and not solder. Everything else comes from KiCad's libraries or from
+  a human.
+- **A QA check that cannot run is `unchecked`, never `pass`.** A green report meaning "I didn't
+  look" is worse than no report. See `assets/qa.py` — the aggregate status is `unchecked` when
+  every result was skipped.
+- **Symbols are never shared between parts; footprints and 3D models are.** A symbol carries the
+  part's own name and `Value`. Catalog reuse applies to the other two kinds, and that is what keeps
+  fifty 0402 resistors from creating fifty footprints.
+- **`cad/scripts/obj2step.py` is not on klm's import path on purpose.** It runs under FreeCAD's
+  interpreter; putting it under `src/klm` would invite someone to import it.
 - **The AI agent has no tool that writes to the catalog.** Architectural, not a prompt
   instruction. It proposes into a review queue; a human approves; the result is still only a
   `draft` that must pass asset QA and lint. See `docs/adr/0006`.
@@ -111,6 +125,10 @@ remain and block later phases.
   its terms forbid redistributing the data or the documentation. klm's users won't get it, so
   **manual entry is the primary LCSC path** and klm ships no unofficial-endpoint client in any
   mode. See `docs/adr/0009`. Do not add one.
+- **Q4 — checked, still open, and the finding is that there is no finding.** Nothing published
+  addresses redistribution of EasyEDA-derived library assets. An absent answer is not a permissive
+  one, so **the EasyEDA importer was dropped from Phase 3** rather than written and disabled —
+  ADR-0009 independently rules it out anyway. Do not add it without answering Q4 first.
 
 ## Roadmap
 

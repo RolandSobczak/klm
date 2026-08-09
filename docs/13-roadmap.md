@@ -60,13 +60,28 @@ a first-class offer — it ages, lints and orders exactly like a fetched one.
 
 - Template generation for passives and standard packages
 - KiCad standard-library lookup and reuse
-- EasyEDA import
+- ~~EasyEDA import~~ — **dropped**, see below
 - FreeCAD mesh→STEP conversion
 - The QA gate — all three check groups
 - `klm part add`, `klm assets *`
 
-**Done when:** `klm part add --lcsc C8734` produces an approvable part with symbol, footprint and
-STEP model.
+**Done when:** ~~`klm part add --lcsc C8734` produces an approvable part~~ —
+`klm part add --mpn … --package 0402 --category Passive/Resistor` produces an approvable part with
+symbol and footprint, and a STEP model wherever KiCad's libraries carry one.
+
+Two changes, both consequences of decisions taken earlier:
+
+- **EasyEDA import is dropped, not deferred.** [ADR-0009](adr/0009-lcsc-manual-first.md) rules out
+  clients against LCSC's unofficial endpoints, and the EasyEDA component API is one.
+  [Q4](14-open-questions.md#q4) — redistribution of EasyEDA-derived assets — was checked and is
+  still unanswered. Either reason alone was sufficient.
+- **`--lcsc C8734` cannot be the entry point** without EasyEDA, because nothing maps an LCSC number
+  to an MPN offline. It remains a flag that *records* the number as an offer.
+
+What this costs is narrower than it looks: sources 1–3 (catalog reuse, KiCad's libraries, klm's own
+generators) cover passives, chip packages and everything KiCad already carries — the bulk of a
+hobby library. What is lost is the long tail of LCSC-only parts, which now needs a hand-drawn
+symbol and `klm import --from-kicad`.
 
 *Solves [P2](01-vision-and-problems.md#p2--library-assets-are-a-chore-per-part).*
 

@@ -18,12 +18,20 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from klm import __version__
+from klm.assets.qa import QaReport, QaStatus, check_model3d
+from klm.cad.freecad import FreeCadUnavailable, convert_mesh
 from klm.config import Config, load_config
 from klm.environment import find_kicad_config, probe_all
 from klm.hooks import HOOK_BLOCK, HOOK_ID, PRE_COMMIT_CONFIG, PRE_COMMIT_TEMPLATE
 from klm.model import Confidence, Offer, Part, PartStatus, PriceBreak
 from klm.serial.part_file import to_yaml
-from klm.services.catalog import get_part, list_parts
+from klm.services.assets import (
+    acquire_assets,
+    register_asset,
+    reuse_candidates,
+    run_qa,
+)
+from klm.services.catalog import get_part, list_parts, save_part
 from klm.services.exporter import PART_FILE, export_catalog, import_catalog
 from klm.services.generate import generate
 from klm.services.importer import import_symbol_library
@@ -36,6 +44,7 @@ from klm.services.offers import (
     save_offer,
     stale_part_ids,
 )
+from klm.services.part_add import add_part
 from klm.services.register import apply_plan, plan_registration
 from klm.store import AssetKind, AssetStore, Paths, connect, migrate
 from klm.store.db import SCHEMA_VERSION, user_version
@@ -195,6 +204,9 @@ def build_parser() -> argparse.ArgumentParser:
     offers.add_argument("--moq", type=int, default=1, help="With --add: minimum order quantity.")
     offers.add_argument("--currency", help="With --add: currency (default: the supplier's).")
     offers.set_defaults(func=cmd_offers)
+
+    _add_part_parser(sub)
+    _add_assets_parser(sub)
 
     gen = sub.add_parser("generate", help="Rebuild the KiCad libraries from the catalog.")
     gen.set_defaults(func=cmd_generate)
@@ -849,6 +861,296 @@ def _offers_json(offers: list[Offer], qty: int) -> str:
         for o in offers
     ]
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# part / assets
+# ---------------------------------------------------------------------------
+
+
+def _add_part_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    part = sub.add_parser("part", help="Create and inspect catalog parts.")
+    actions = part.add_subparsers(dest="part_command", metavar="ACTION")
+
+    add = actions.add_parser("add", help="Create a part and acquire its assets.")
+    add.add_argument("--mpn", required=True, help="Manufacturer part number.")
+    add.add_argument("--mfr", default="", help="Manufacturer. Left blank if unknown.")
+    add.add_argument("--category", help="Taxonomy path, e.g. Passive/Resistor.")
+    add.add_argument("--package", help="Physical package, e.g. 0402, SOT-23-5.")
+    add.add_argument("--value", default="", help="Display value; normalized where possible.")
+    add.add_argument("--description", default="", help="One-line human summary.")
+    add.add_argument("--datasheet", help="Datasheet URL.")
+    add.add_argument(
+        "--field",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Extra symbol field, repeatable (e.g. --field Tolerance=1%%).",
+    )
+    add.add_argument("--lcsc", metavar="C12345", help="Record an LCSC part number as an offer.")
+    add.add_argument(
+        "--status",
+        choices=[str(s) for s in PartStatus],
+        default=str(PartStatus.DRAFT),
+        help="Status for the new part (default: draft).",
+    )
+    add.add_argument(
+        "--offline",
+        action="store_true",
+        help="Do not consult suppliers to fill in missing details.",
+    )
+    add.set_defaults(func=cmd_part_add)
+
+
+def _add_assets_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    assets = sub.add_parser("assets", help="Acquire, check and convert a part's files.")
+    actions = assets.add_subparsers(dest="assets_command", metavar="ACTION")
+
+    acquire = actions.add_parser("acquire", help="(Re)run asset acquisition for a part.")
+    acquire.add_argument("part", metavar="ID_OR_MPN")
+    acquire.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace assets the part already has, discarding hand corrections.",
+    )
+    acquire.set_defaults(func=cmd_assets_acquire)
+
+    qa = actions.add_parser("qa", help="Re-run the QA gate on a part's stored assets.")
+    qa.add_argument("part", nargs="?", metavar="ID_OR_MPN", help="Default: every part.")
+    qa.add_argument("--format", choices=("text", "json"), default="text")
+    qa.set_defaults(func=cmd_assets_qa)
+
+    convert = actions.add_parser("convert-3d", help="Convert a mesh to a solid STEP model.")
+    convert.add_argument("mesh", metavar="PATH", help="An .obj, .wrl, .stl, .ply or .off file.")
+    convert.add_argument("--part", metavar="ID_OR_MPN", help="Attach the result to this part.")
+    convert.add_argument(
+        "--tolerance", type=float, default=0.1, help="Mesh tolerance in mm (default: 0.1)."
+    )
+    convert.set_defaults(func=cmd_assets_convert)
+
+    reuse = actions.add_parser("reuse-check", help="Find near-duplicate footprints.")
+    reuse.set_defaults(func=cmd_assets_reuse)
+
+
+def _print_qa(label: str, report: QaReport, *, verbose: bool = False) -> None:
+    mark = {QaStatus.PASS: _OK, QaStatus.WARN: _WARN, QaStatus.FAIL: _FAIL}.get(
+        report.status, _INFO
+    )
+    print(f"{mark} {label:<10} {report.status}")
+    for result in report.results:
+        if verbose or result.status in (QaStatus.FAIL, QaStatus.WARN):
+            print(f"      {result}")
+
+
+def _parse_fields(pairs: Sequence[str]) -> dict[str, str]:
+    """`--field Tolerance=1%` → `{"Tolerance": "1%"}`.
+
+    A pair with no `=` is an error rather than a field with an empty value:
+    `--field Tolerance` almost certainly means the value was forgotten, and
+    silently writing an empty field would trip lint rule S006 later with no
+    clue why.
+    """
+    fields: dict[str, str] = {}
+    for pair in pairs:
+        name, sep, value = pair.partition("=")
+        if not sep or not name.strip():
+            raise ValueError(f"--field expects NAME=VALUE, got {pair!r}")
+        fields[name.strip()] = value.strip()
+    return fields
+
+
+def cmd_part_add(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    config = load_config(paths.config)
+
+    adapters = (
+        {} if args.offline else build_adapters(config, paths.supplier_cache, offline=False)
+    )
+    store = AssetStore(paths.assets)
+    conn = connect(paths.db, create=False)
+    try:
+        report = add_part(
+            conn,
+            store,
+            mpn=args.mpn,
+            manufacturer=args.mfr,
+            category=args.category,
+            package=args.package,
+            value=args.value,
+            description=args.description,
+            datasheet=args.datasheet,
+            fields=_parse_fields(args.field),
+            lcsc=args.lcsc,
+            adapters=adapters,
+            status=PartStatus(args.status),
+        )
+    finally:
+        conn.close()
+
+    part = report.part
+    verb = "created" if report.created else "updated"
+    who = part.manufacturer or "manufacturer unknown"
+    print(f"{_OK} {verb} {part.klm_id}  {part.mpn}  ({who})")
+    for note in report.notes:
+        print(f"{_INFO} {note}")
+
+    assets = report.assets
+    if assets is not None:
+        for acquired in assets.acquired:
+            print(f"  {acquired.kind.value:<10} {acquired.origin:<16} {acquired.detail}")
+            if acquired.qa is not None and acquired.qa.status is not QaStatus.PASS:
+                _print_qa(acquired.kind.value, acquired.qa)
+        for kind, reason in assets.unavailable:
+            print(f"{_WARN} {kind}: {reason}")
+
+    for offer in report.offers:
+        print(f"  offer      {offer.supplier}:{offer.supplier_pn}")
+
+    print()
+    print("Next: klm lint --select S,V,A --fix --dry-run, then approve it")
+    return EXIT_OK if report.ok else EXIT_CHECK_FAILED
+
+
+def cmd_assets_acquire(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    store = AssetStore(paths.assets)
+
+    conn = connect(paths.db, create=False)
+    try:
+        part = _resolve_part(conn, args.part)
+        report = acquire_assets(conn, store, part, overwrite=args.overwrite)
+    finally:
+        conn.close()
+
+    print(f"{part.klm_id}  {part.mpn}")
+    for acquired in report.acquired:
+        note = "  [reused]" if acquired.reused else ""
+        print(f"  {acquired.kind.value:<10} {acquired.origin:<16} {acquired.detail}{note}")
+        if acquired.qa is not None:
+            _print_qa(acquired.kind.value, acquired.qa)
+    for kind, reason in report.unavailable:
+        print(f"{_WARN} {kind}: {reason}")
+
+    if not report.acquired and not report.unavailable:
+        print(f"{_OK} nothing to do — every asset is already present")
+        return EXIT_OK
+    return EXIT_OK if report.ok else EXIT_CHECK_FAILED
+
+
+def cmd_assets_qa(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    store = AssetStore(paths.assets)
+
+    conn = connect(paths.db, create=False)
+    try:
+        parts = [_resolve_part(conn, args.part)] if args.part else list_parts(conn)
+        results = {part.klm_id: (part, run_qa(conn, store, part)) for part in parts}
+    finally:
+        conn.close()
+
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    klm_id: {kind.value: json.loads(report.to_json())
+                             for kind, report in reports.items()}
+                    for klm_id, (_part, reports) in results.items()
+                },
+                indent=2,
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+        )
+        failed = any(
+            not report.passed for _part, reports in results.values() for report in reports.values()
+        )
+        return EXIT_CHECK_FAILED if failed else EXIT_OK
+
+    failures = 0
+    for _klm_id, (part, reports) in sorted(results.items()):
+        if not reports:
+            continue
+        print(f"{part.klm_id}  {part.mpn}")
+        for kind, report in reports.items():
+            _print_qa(kind.value, report, verbose=bool(args.part))
+            failures += 0 if report.passed else 1
+        print()
+
+    if failures:
+        print(f"{_FAIL} {failures} asset(s) fail the QA gate and cannot be approved")
+        return EXIT_CHECK_FAILED
+    print(f"{_OK} {len(results)} part(s) checked, no blocking failures")
+    return EXIT_OK
+
+
+def cmd_assets_convert(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    source = Path(args.mesh).expanduser()
+
+    try:
+        result = convert_mesh(source, paths.cache / "models3d", tolerance=args.tolerance)
+    except FreeCadUnavailable as exc:
+        print(f"{_WARN} {exc}")
+        return EXIT_CHECK_FAILED
+
+    state = "already converted" if result.cached else "converted"
+    print(f"{_OK} {state}: {result.output}")
+    if not result.watertight:
+        print(f"{_WARN} the source mesh was not watertight; the solid has gaps")
+
+    data = result.output.read_bytes()
+    report = check_model3d(data)
+    _print_qa("model3d", report, verbose=True)
+
+    if not args.part:
+        return EXIT_OK if report.passed else EXIT_CHECK_FAILED
+
+    store = AssetStore(paths.assets)
+    conn = connect(paths.db, create=False)
+    try:
+        part = _resolve_part(conn, args.part)
+        part.model3d_hash = store.add_bytes(data, AssetKind.MODEL3D)
+        register_asset(
+            conn,
+            part.model3d_hash,
+            AssetKind.MODEL3D,
+            filename=source.stem,
+            source="generated",
+            qa=report,
+        )
+        save_part(conn, part)
+    finally:
+        conn.close()
+
+    print(f"{_OK} attached to {part.klm_id} ({part.mpn})")
+    return EXIT_OK if report.passed else EXIT_CHECK_FAILED
+
+
+def cmd_assets_reuse(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    store = AssetStore(paths.assets)
+
+    conn = connect(paths.db, create=False)
+    try:
+        candidates = reuse_candidates(conn, store)
+    finally:
+        conn.close()
+
+    if not candidates:
+        print(f"{_OK} no duplicate footprints found")
+        return EXIT_OK
+
+    for candidate in candidates:
+        print(f"{_WARN} {candidate.left}")
+        print(f"       {candidate.right}")
+        print(f"       {candidate.detail}")
+    print(f"\n{len(candidates)} duplicate footprint(s) — merging them shrinks the catalog")
+    return EXIT_CHECK_FAILED
 
 
 # ---------------------------------------------------------------------------

@@ -33,6 +33,13 @@ klm assets qa <klm_id>
 klm assets convert-3d <file.obj>
 klm assets reuse-check
 
+PARTS AND ASSETS
+klm part add --mpn … --mfr … --category … --package … [--value …] [--field N=V] [--lcsc C…]
+klm assets acquire <id|mpn> [--overwrite]
+klm assets qa [<id|mpn>] [--format json]
+klm assets convert-3d <mesh> [--part <id|mpn>] [--tolerance 0.1]
+klm assets reuse-check
+
 CATALOG
 klm lint [--project .] [--fix] [--select …] [--format json]
 klm generate                     Rebuild generated/ from the catalog
