@@ -67,11 +67,14 @@ no setup.
       "klm_id": "01JB4K7QW8ZR3XN5M2VYT9DCFA",
       "mpn": "STM32F103C8T6",
       "symbol_name": "STM32F103C8T6",
+      "footprint_name": "LQFP-48_7x7mm_P0.5mm",
+      "model_name": null,
       "global_symbol_hash":   "sha256:3f9a…",
       "global_footprint_hash":"sha256:71c4…",
       "global_model3d_hash":  "sha256:aa02…",
-      "vendored_symbol_hash": "sha256:3f9a…",
-      "vendored_footprint_hash":"sha256:71c4…",
+      "vendored_symbol_hash": "sha256:5c81…",
+      "vendored_footprint_hash":"sha256:e30d…",
+      "vendored_model3d_hash": null,
       "references": ["U1"]
     }
   ]
@@ -82,6 +85,17 @@ Recording *both* the global hash at vendoring time and the vendored hash is what
 status` distinguish "the global catalog moved on" from "someone edited the project copy" from
 "both changed" — the three cases need different handling and conflating them is how sync tools
 lose data.
+
+The two hashes for the same part are normally **different**, and that is not a bug: the vendored
+symbol has been renamed and had the canonical field schema imposed on it, and the vendored
+footprint's `(model …)` path points inside the project. Only the recorded-vs-current comparison
+on each side means anything; comparing the global hash against the vendored one does not.
+
+`symbol_name` is `null` for a **footprint-only** entry — a mounting hole placed on the board and
+never on a sheet. `model_name` is `null` unless the project was vendored with `--with-3d`.
+
+`vendored_at` is preserved across a re-vendor that changes nothing else, so an unchanged project
+produces a zero-byte diff by default; `--no-timestamp` omits the field entirely.
 
 The lock file is committed. It is the contract between the repository and the catalog.
 
@@ -95,8 +109,9 @@ Global → project. Makes a linked project self-contained.
 1. Parse .kicad_sch, collect every symbol instance and its lib_id.
 2. Resolve each to a klm_id:
       a. read the KLM_ID field on the instance          ← authoritative
-      b. else match lib_id name against the catalog     ← fallback
-      c. else record as unresolved                      ← reported, not guessed
+      b. else the name the lock file recorded           ← survives a rename
+      c. else match lib_id name against the catalog     ← fallback
+      d. else record as unresolved                      ← reported, not guessed
 3. Abort if anything is unresolved, unless --allow-unresolved.
 4. Collect the transitive asset set (symbols, footprints, 3D models).
 5. Write libraries/<name>.kicad_sym  from the symbol assets.
@@ -119,17 +134,47 @@ Everything is written to a staging directory and moved into place atomically, so
 vendor leaves the project untouched.
 
 ```bash
-klm vendor                       # current project, no 3D models
-klm vendor --with-3d             # include STEP files
-klm vendor --dry-run             # print the plan and the diff
-klm vendor --name shared-libs    # override the library name
+klm vendor                        # current project, no 3D models
+klm vendor --with-3d              # include STEP files
+klm vendor --dry-run              # print the plan and the diff
+klm vendor --name shared-libs     # override the library name
+klm vendor --from-library Passive # also resolve this library against the catalog
+klm vendor --strict               # refuse any symbol klm does not manage
 ```
+
+### Which references vendoring claims — and which it only reports
+
+Step 2 above applies to libraries klm manages: `KLM:`, the project's own vendored library, and any
+nickname named with `--from-library`. A `lib_id` from **any other** library is a different fact.
+`power:GND`, `Device:R` and `Connector_Generic:Conn_01x02` were never klm parts, and one real
+schematic carries dozens of them — aborting there would make the command unusable and push every
+user to `--allow-unresolved`, switching off the check for the klm symbols too.
+
+So the two are reported separately: **unresolved** aborts, **external** is grouped by nickname,
+left linked, and printed. `--strict` promotes external to an error.
+
+The consequence has to be stated plainly: **`klm vendor` alone does not establish that a project
+is self-contained.** Answering that requires resolving the project on a machine that has nothing,
+which is `klm verify --clean-room` in [Phase 6](13-roadmap.md#phase-6--repository-scaffolding-and-ci).
+See [ADR-0010](adr/0010-vendoring-leaves-unmanaged-libraries-linked.md).
+
+`--from-library` is also the **adoption path**: a project that predates klm references its own
+`Passive:0R_0603`, and re-linking every symbol to `KLM:` by hand before vendoring is not a
+reasonable ask. It is a flag rather than a default because resolving any nickname by name would let
+`Device:R` silently claim a catalog part called `R`.
 
 ### `klm unvendor`
 
 Project → global-linked. The exact inverse: rewrite `lib_id`s back to `KLM:`, delete
-`libraries/` and the project lib tables, set mode to `linked`. Refuses to run if any vendored
-part has drifted from the catalog, so local work can't be silently destroyed.
+`libraries/`, remove klm's rows from the project lib tables, set mode to `linked`. Refuses to run
+if any vendored part has drifted from the catalog, so local work can't be silently destroyed;
+`--force` says the loss was deliberate.
+
+Two details worth stating. The lib *tables* are the user's files and may name libraries klm knows
+nothing about, so only klm's row is removed — the file is deleted just when nothing else is left in
+it. And a project adopted via `--from-library Passive` comes back as `KLM:`, not as `Passive:`,
+because after adoption those parts live in the catalog; the round trip is byte-identical only for a
+project that was already klm-linked.
 
 ### `klm sync status`
 
@@ -144,6 +189,12 @@ the recorded global hash, the *current* global hash, and the current vendored ha
 | **differs** | **differs** | `conflict` | Both changed; needs a decision |
 | — | part absent | `missing` | Vendored library lost a part |
 | part absent from catalog | — | `orphan` | Project has a part the catalog doesn't |
+| in step, but retired upstream | — | `deprecated-upstream` | Warning, not an error |
+
+A symbol sitting in the vendored library with **no lock entry at all** is also `orphan` — that is
+the collaborator case, and it is the one the state exists for. A comparison against an asset the
+entry never had is skipped rather than read as a change: a part vendored without a 3D model has
+not lost one.
 
 ```
 $ klm sync status
@@ -174,15 +225,32 @@ Project → global. Two related operations:
   you fixed a footprint while working on a board and want the fix to be global.
 - **`promote`** takes an `orphan` part (one that exists only in the project — typically added by
   a collaborator) and creates a catalog entry for it. This runs it through the same validation
-  as any new part: field schema, asset QA, offer lookup. It lands as `draft`, requiring approval.
+  as any new part: field schema and asset QA. It lands as `draft`, requiring approval.
 
 Both are the mechanism by which collaboration flows back into the catalog rather than being lost.
 
+Two things `push` has to get right, both of which would be invisible if wrong:
+
+- The vendored footprint's `(model …)` path points at `${KIPRJMOD}/libraries/packages3d/…`.
+  Storing that as a catalog asset would hand every other project a path that resolves only inside
+  this one, so it is rewritten back to `${KLM_3DMODELS}` on the way in.
+- Pushing a footprint fix is not a reason to re-approve the part, so its status is left alone —
+  but it *is* a reason to re-run the QA gate, which `push` does.
+
+`promote` also writes the new `KLM_ID` into the project's copy of the symbol. Without that the
+symbol reads as an orphan again on the next `sync status` and nothing ever converges.
+
 ### `klm sync resolve`
 
-Interactive conflict resolution: for each conflicting part show a diff of the global asset
-against the vendored one and offer `use-global` / `use-project` / `skip` / `open-in-editor`.
-Non-interactively, `--strategy prefer-global|prefer-project` applies uniformly.
+Interactive conflict resolution: for each conflicting part, report which assets moved on each side
+and offer `use-global` / `use-project` / `skip`. The answers are then applied as a `sync pull` and
+a `sync push` over the two selected sets. Non-interactively — and in CI, where there is no terminal
+— `--strategy prefer-global|prefer-project` applies one answer uniformly, and running without it
+outside a terminal is an error rather than a silent default.
+
+`open-in-editor` from the original sketch is not implemented. It needs an editor to launch and a
+temporary checkout of both sides to launch it on, which is a Phase 8 concern; the diff belongs in
+the desktop app's sync screen, where it can be shown side by side.
 
 ## 4. Why `KLM_ID` is load-bearing
 

@@ -85,7 +85,7 @@ ships with an empty table and learns from run one — slower, but the architectu
 
 ## Q4 — Licensing of imported library assets — **still open**, and now load-bearing
 
-**Blocks:** Phase 3 (the EasyEDA importer), Phase 4 (for publication)
+**Blocks:** Phase 3 (the EasyEDA importer) · **No longer blocks Phase 4**
 
 Redistribution status of EasyEDA/LCSC-derived symbols, footprints and 3D models is unclear. This
 matters specifically because vendored projects are intended for GitHub.
@@ -111,6 +111,13 @@ covers derived works of this kind.
 such question. KiCad's libraries are permissively licensed with an explicit design-use exception,
 and klm records that on every asset it takes (`asset.license_note`), so `klm licenses --project .`
 will have something true to report when it arrives.
+
+**Why it stopped blocking Phase 4 (August 2026).** Vendoring copies catalog assets into a
+repository intended for GitHub, which is exactly the case this question covers — but the importer
+that would have produced assets with an unclear status was never written, so there are none to
+vendor. Every asset klm can hold today comes from KiCad's libraries or its own generators. The
+question stays open for whenever an unclear source is added, and `klm licenses --project .` is
+where it will surface.
 
 **klm will not attempt to give legal advice.** It reports origin and flags uncertainty.
 

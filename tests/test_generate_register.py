@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 
@@ -450,3 +451,24 @@ def test_no_temporary_files_are_left_behind(env, tmp_path: Path) -> None:
     config = tmp_path / "kicad" / "9.0"
     apply_plan(paths, config)
     assert list(config.glob("*.klm-tmp")) == []
+
+
+def test_fields_are_emitted_in_canonical_schema_order(env) -> None:
+    """Insertion order would make the same fields diff differently per part."""
+    paths, conn, store = env
+    seed_part(store, conn)
+    generate(conn, paths)
+
+    text = paths.generated_symbols.read_text(encoding="utf-8")
+    names = re.findall(r'\(property "([^"]+)"', text)
+    modelled = [n for n in names if n in ("Reference", "Value", "Footprint", "Datasheet",
+                                          "MPN", "Manufacturer", "Description", "Package",
+                                          KLM_ID)]
+    assert modelled == [
+        "Reference", "Value", "Footprint", "Datasheet",
+        "MPN", "Manufacturer", "Description", "Package", KLM_ID,
+    ]
+    # Names klm does not model sort after the canonical ones, by name, so they
+    # are stable too rather than merely last.
+    unknown = [n for n in names if n not in modelled]
+    assert unknown == sorted(unknown)

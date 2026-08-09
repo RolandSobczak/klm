@@ -52,12 +52,16 @@ klm offers [ID|MPN] [--supplier lcsc] [--qty 100] [--format json]
 klm offers <ID|MPN> --supplier lcsc --add C8734 --price 1.42 --stock 4200
 klm offers --supplier lcsc --remove C8734
 
-SYNC
-klm vendor [--with-3d] [--dry-run]
-klm unvendor
-klm sync status [--exit-code]
-klm sync pull | push | resolve | adopt
-klm promote <symbol-or-klm_id>
+SYNC                                                every command takes --project DIR
+klm vendor [--with-3d] [--dry-run] [--name N] [--from-library NICK] [--strict]
+           [--allow-unresolved] [--no-timestamp]
+klm unvendor [--dry-run] [--force]
+klm sync status [--exit-code] [--format json]
+klm sync pull [PART …] [--strategy prefer-global] [--dry-run]
+klm sync push [PART …] [--strategy prefer-project] [--dry-run]
+klm sync resolve [--strategy prefer-global|prefer-project]
+klm sync adopt [--name N] [--dry-run]
+klm promote <symbol|mpn|klm_id> [--category PATH]
 
 BUILD & FAB
 klm bom --project . [--variant v] [--format csv|json]

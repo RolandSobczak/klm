@@ -14,7 +14,7 @@ import json
 import os
 import sqlite3
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from klm import __version__
@@ -23,6 +23,7 @@ from klm.cad.freecad import FreeCadUnavailable, convert_mesh
 from klm.config import Config, load_config
 from klm.environment import find_kicad_config, probe_all
 from klm.hooks import HOOK_BLOCK, HOOK_ID, PRE_COMMIT_CONFIG, PRE_COMMIT_TEMPLATE
+from klm.kicad.project import LOCK_FILE, KiCadProject, find_project
 from klm.model import Confidence, Offer, Part, PartStatus, PriceBreak
 from klm.serial.part_file import to_yaml
 from klm.services.assets import (
@@ -46,6 +47,18 @@ from klm.services.offers import (
 )
 from klm.services.part_add import add_part
 from klm.services.register import apply_plan, plan_registration
+from klm.services.sync import (
+    SyncReport,
+    SyncRow,
+    SyncState,
+    SyncStatus,
+    adopt,
+    promote,
+    pull,
+    push,
+    sync_status,
+)
+from klm.services.vendor import VendorError, VendorPlan, plan_vendor, unvendor, vendor
 from klm.store import AssetKind, AssetStore, Paths, connect, migrate
 from klm.store.db import SCHEMA_VERSION, user_version
 from klm.suppliers.lcsc import is_lcsc_pn, product_url
@@ -229,7 +242,111 @@ def build_parser() -> argparse.ArgumentParser:
     )
     reg.set_defaults(func=cmd_register)
 
+    _add_sync_parsers(sub)
+
     return parser
+
+
+def _project_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--project",
+        metavar="DIR",
+        default=".",
+        help="The KiCad project to act on (default: the current directory).",
+    )
+
+
+def _add_sync_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    vendor_cmd = sub.add_parser("vendor", help="Copy the parts a project uses into the project.")
+    _project_argument(vendor_cmd)
+    vendor_cmd.add_argument("--name", metavar="NAME", help="Library name (default: the project's).")
+    vendor_cmd.add_argument(
+        "--with-3d", action="store_true", help="Include STEP models in the project."
+    )
+    vendor_cmd.add_argument(
+        "--from-library",
+        metavar="NICKNAME",
+        action="append",
+        default=[],
+        dest="from_libraries",
+        help="Also resolve this library's symbols by name — for projects predating klm.",
+    )
+    vendor_cmd.add_argument(
+        "--dry-run", action="store_true", help="Print the plan and stop, changing nothing."
+    )
+    vendor_cmd.add_argument(
+        "--allow-unresolved",
+        action="store_true",
+        help="Vendor what resolves and leave the rest linked to their own libraries.",
+    )
+    vendor_cmd.add_argument(
+        "--strict",
+        action="store_true",
+        help="Also refuse when any symbol comes from a library klm does not manage.",
+    )
+    vendor_cmd.add_argument(
+        "--no-timestamp",
+        action="store_true",
+        help="Omit vendored_at from the lock file, for reproducible-build workflows.",
+    )
+    vendor_cmd.set_defaults(func=cmd_vendor)
+
+    unvendor_cmd = sub.add_parser("unvendor", help="Point a project back at the global libraries.")
+    _project_argument(unvendor_cmd)
+    unvendor_cmd.add_argument("--dry-run", action="store_true", help="Print the plan and stop.")
+    unvendor_cmd.add_argument(
+        "--force",
+        action="store_true",
+        help="Discard local edits to the vendored copies rather than refusing.",
+    )
+    unvendor_cmd.set_defaults(func=cmd_unvendor)
+
+    sync = sub.add_parser("sync", help="Compare a vendored project against the catalog.")
+    actions = sync.add_subparsers(dest="action", metavar="ACTION", required=True)
+
+    status = actions.add_parser("status", help="Report drift. Changes nothing.")
+    _project_argument(status)
+    status.add_argument(
+        "--exit-code", action="store_true", help="Exit non-zero if anything needs attention."
+    )
+    status.add_argument("--format", choices=("text", "json"), default="text")
+    status.set_defaults(func=cmd_sync_status)
+
+    pull_cmd = actions.add_parser("pull", help="Bring catalog changes into the project.")
+    _project_argument(pull_cmd)
+    pull_cmd.add_argument("parts", nargs="*", metavar="PART", help="Limit to these MPNs or ids.")
+    pull_cmd.add_argument("--strategy", choices=("prefer-global",), help="How to treat conflicts.")
+    pull_cmd.add_argument("--dry-run", action="store_true")
+    pull_cmd.set_defaults(func=cmd_sync_pull)
+
+    push_cmd = actions.add_parser("push", help="Move a project's edits into the catalog.")
+    _project_argument(push_cmd)
+    push_cmd.add_argument("parts", nargs="*", metavar="PART", help="Limit to these MPNs or ids.")
+    push_cmd.add_argument("--strategy", choices=("prefer-project",), help="How to treat conflicts.")
+    push_cmd.add_argument("--dry-run", action="store_true")
+    push_cmd.set_defaults(func=cmd_sync_push)
+
+    resolve = actions.add_parser("resolve", help="Decide conflicts, one part at a time.")
+    _project_argument(resolve)
+    resolve.add_argument(
+        "--strategy",
+        choices=("prefer-global", "prefer-project"),
+        help="Apply one decision to every conflict instead of asking.",
+    )
+    resolve.set_defaults(func=cmd_sync_resolve)
+
+    adopt_cmd = actions.add_parser("adopt", help="Rebuild a lost lock file from what is on disk.")
+    _project_argument(adopt_cmd)
+    adopt_cmd.add_argument("--name", metavar="NAME", help="Vendored library name.")
+    adopt_cmd.add_argument("--dry-run", action="store_true")
+    adopt_cmd.set_defaults(func=cmd_sync_adopt)
+
+    promote_cmd = sub.add_parser("promote", help="Add a project-only part to the catalog.")
+    promote_cmd.add_argument("reference", metavar="PART", help="Symbol name, MPN or KLM_ID.")
+    _project_argument(promote_cmd)
+    promote_cmd.add_argument("--category", metavar="PATH", help="Category for the new part.")
+    promote_cmd.add_argument("--dry-run", action="store_true")
+    promote_cmd.set_defaults(func=cmd_promote)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -1224,6 +1341,349 @@ def cmd_register(args: argparse.Namespace) -> int:
 
     print(f"\n{_OK} registered ({len(plan.changes)} change(s)); originals kept as *.klm-bak")
     print(f"{_INFO} restart KiCad for the new libraries to appear")
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# vendor / unvendor / sync / promote
+# ---------------------------------------------------------------------------
+
+
+def _open_project(args: argparse.Namespace) -> tuple[Paths, KiCadProject]:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    return paths, find_project(args.project)
+
+
+def _require_vendored(project: KiCadProject) -> None:
+    """A linked project is a normal state, not a klm error — say so and stop.
+
+    Letting `LockError` reach the top would exit 2 ("klm itself errored") for a
+    project that is simply not vendored yet.
+    """
+    if not project.is_vendored:
+        raise SystemExit(
+            f"klm: {project.root} is not vendored — there is no {LOCK_FILE} to compare against.\n"
+            "      Run `klm vendor` first, or `klm sync adopt` if the lock was lost."
+        )
+
+
+def _selection(parts: Sequence[str], status: SyncStatus) -> set[str] | None:
+    """Turn part arguments into klm_ids, or None for "everything applicable"."""
+    if not parts:
+        return None
+    wanted = set(parts)
+    chosen = {row.klm_id for row in status.rows if wanted & {row.klm_id, row.mpn, row.symbol_name}}
+    missing = wanted - {row.klm_id for row in status.rows} - {row.mpn for row in status.rows}
+    missing -= {row.symbol_name or "" for row in status.rows}
+    if missing:
+        raise SystemExit(f"klm: not in this project: {', '.join(sorted(missing))}")
+    return chosen
+
+
+def cmd_vendor(args: argparse.Namespace) -> int:
+    paths, project = _open_project(args)
+    conn = connect(paths.db, create=False)
+    try:
+        store = AssetStore(paths.assets)
+        try:
+            report = vendor(
+                conn,
+                store,
+                project,
+                library_name=args.name,
+                include_3d=args.with_3d,
+                from_libraries=args.from_libraries,
+                allow_unresolved=args.allow_unresolved,
+                strict=args.strict,
+                dry_run=args.dry_run,
+                timestamp=not args.no_timestamp,
+            )
+        except VendorError as exc:
+            plan = plan_vendor(
+                conn,
+                store,
+                project,
+                library_name=args.name,
+                from_libraries=args.from_libraries,
+            )
+            _print_unvendored(plan)
+            print(f"\n{_FAIL} {exc}")
+            return EXIT_CHECK_FAILED
+    finally:
+        conn.close()
+
+    verb = "would vendor" if args.dry_run else "vendored"
+    print(f"{_OK} {verb} {report.symbols} symbols and {report.footprints} footprints", end="")
+    print(f" (+{report.models} 3D models)" if report.models else "")
+    print(f"    into {project.libraries}")
+    for name, count in sorted(report.rewritten.items()):
+        print(f"    {name}: {count} reference(s) rewritten")
+    if report.plan.footprint_only:
+        print(f"{_INFO} {len(report.plan.footprint_only)} footprint-only part(s) from the board")
+    _print_unvendored(report.plan)
+    if report.build.skipped:
+        for klm_id, reason in report.build.skipped:
+            print(f"{_WARN} {klm_id}: {reason}")
+
+    if args.dry_run:
+        print(f"\n{_INFO} nothing written; {'changes' if report.changed else 'no changes'} pending")
+        return EXIT_OK
+    if not report.changed:
+        print(f"\n{_OK} already up to date")
+        return EXIT_OK
+    print(f"\n{_OK} {project.lock_file.name} written; originals kept as *.klm-bak")
+    return EXIT_OK
+
+
+def _print_unvendored(plan: VendorPlan) -> None:
+    """Blocking problems in full; the rest grouped, or it drowns them out.
+
+    A real schematic carries dozens of `power:GND` flags. Printing one line each
+    would bury the two symbols that actually need a decision.
+    """
+    if plan.unresolved:
+        print()
+        for item in plan.unresolved:
+            where = f"{item.where}:" if item.where else ""
+            print(f"{_FAIL} {where}{item.reference or '?'} {item.lib_id} — {item.reason}")
+
+    if plan.external:
+        by_library: dict[str, list[str]] = {}
+        for item in plan.external:
+            nickname = item.lib_id.partition(":")[0]
+            by_library.setdefault(nickname, []).append(item.reference or "?")
+        print()
+        print(f"{_INFO} left linked — klm does not manage these libraries:")
+        for nickname, refs in sorted(by_library.items()):
+            shown = ", ".join(sorted(refs)[:4])
+            more = f", +{len(refs) - 4} more" if len(refs) > 4 else ""
+            print(f"      {nickname:<22} {len(refs):>3} symbol(s)   {shown}{more}")
+        print("      → --from-library NICKNAME resolves one of these against the catalog")
+
+
+def cmd_unvendor(args: argparse.Namespace) -> int:
+    paths, project = _open_project(args)
+    conn = connect(paths.db, create=False)
+    try:
+        try:
+            report = unvendor(
+                conn, AssetStore(paths.assets), project, dry_run=args.dry_run, force=args.force
+            )
+        except VendorError as exc:
+            print(f"{_FAIL} {exc}")
+            return EXIT_CHECK_FAILED
+    finally:
+        conn.close()
+
+    verb = "would restore" if args.dry_run else "restored"
+    print(f"{_OK} {verb} global library references")
+    for name, count in sorted(report.rewritten.items()):
+        print(f"    {name}: {count} reference(s) rewritten")
+    for path in report.removed:
+        print(f"    {'would remove' if args.dry_run else 'removed'} {path.name}")
+    return EXIT_OK
+
+
+_STATE_GLYPH = {
+    SyncState.CLEAN: _OK,
+    SyncState.DEPRECATED_UPSTREAM: _INFO,
+    SyncState.GLOBAL_AHEAD: _WARN,
+    SyncState.PROJECT_AHEAD: _WARN,
+    SyncState.CONFLICT: _FAIL,
+    SyncState.MISSING: _FAIL,
+    SyncState.ORPHAN: _WARN,
+}
+
+
+def cmd_sync_status(args: argparse.Namespace) -> int:
+    paths, project = _open_project(args)
+    _require_vendored(project)
+    conn = connect(paths.db, create=False)
+    try:
+        status = sync_status(conn, project)
+    finally:
+        conn.close()
+
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "project": str(project.root),
+                    "library_name": status.library_name,
+                    "parts": [
+                        {
+                            "klm_id": row.klm_id,
+                            "mpn": row.mpn,
+                            "symbol": row.symbol_name,
+                            "state": str(row.state),
+                            "detail": row.detail,
+                        }
+                        for row in sorted(status.rows, key=lambda r: (r.mpn, r.klm_id))
+                    ],
+                },
+                indent=2,
+            )
+        )
+    else:
+        for state, rows in status.by_state().items():
+            print(f"  {_STATE_GLYPH[state]} {state!s:<20} {len(rows)} part(s)")
+            if state is SyncState.CLEAN:
+                continue
+            for row in rows:
+                print(f"      {row.mpn or row.symbol_name or row.klm_id:<24} {row.detail}")
+        if status.attention:
+            print(f"\n{status.attention} part(s) need attention.")
+            print("See: klm sync pull | klm sync push | klm sync resolve | klm promote")
+        else:
+            print(f"\n{_OK} in step with the catalog")
+
+    return EXIT_CHECK_FAILED if (args.exit_code and status.attention) else EXIT_OK
+
+
+def cmd_sync_pull(args: argparse.Namespace) -> int:
+    return _run_sync(args, pull, "pulled", "would pull")
+
+
+def cmd_sync_push(args: argparse.Namespace) -> int:
+    return _run_sync(args, push, "pushed", "would push")
+
+
+def _run_sync(
+    args: argparse.Namespace,
+    operation: Callable[..., SyncReport],
+    done: str,
+    planned: str,
+) -> int:
+    paths, project = _open_project(args)
+    _require_vendored(project)
+    conn = connect(paths.db, create=False)
+    try:
+        store = AssetStore(paths.assets)
+        selection = _selection(args.parts, sync_status(conn, project))
+        report = operation(
+            conn, store, project, only=selection, strategy=args.strategy, dry_run=args.dry_run
+        )
+    finally:
+        conn.close()
+
+    if not report.applied and not report.skipped:
+        print(f"{_OK} nothing to {done.rstrip('ed')}")
+        return EXIT_OK
+
+    verb = planned if args.dry_run else done
+    for row in report.applied:
+        print(f"{_OK} {verb} {row.mpn or row.symbol_name}: {row.detail}")
+    for kind_reports in report.qa.values():
+        for kind, qa in sorted(kind_reports.items(), key=lambda item: str(item[0])):
+            _print_qa(str(kind), qa)
+    for row, reason in report.skipped:
+        print(f"{_WARN} skipped {row.mpn or row.symbol_name}: {reason}")
+    return EXIT_CHECK_FAILED if report.skipped else EXIT_OK
+
+
+def cmd_sync_resolve(args: argparse.Namespace) -> int:
+    paths, project = _open_project(args)
+    _require_vendored(project)
+    conn = connect(paths.db, create=False)
+    try:
+        store = AssetStore(paths.assets)
+        status = sync_status(conn, project)
+        conflicts = status.select(SyncState.CONFLICT)
+        if not conflicts:
+            print(f"{_OK} no conflicts")
+            return EXIT_OK
+
+        decisions = _decide(conflicts, args.strategy)
+        take_global = {row.klm_id for row, choice in decisions if choice == "use-global"}
+        take_project = {row.klm_id for row, choice in decisions if choice == "use-project"}
+
+        if take_global:
+            pull(conn, store, project, only=take_global, strategy="prefer-global")
+        if take_project:
+            push(conn, store, project, only=take_project, strategy="prefer-project")
+    finally:
+        conn.close()
+
+    skipped = len(conflicts) - len(take_global) - len(take_project)
+    print(
+        f"\n{_OK} {len(take_global)} resolved from the catalog, "
+        f"{len(take_project)} from the project, {skipped} left alone"
+    )
+    return EXIT_CHECK_FAILED if skipped else EXIT_OK
+
+
+def _decide(conflicts: list[SyncRow], strategy: str | None) -> list[tuple[SyncRow, str]]:
+    """Ask about each conflict, or apply one answer to all of them."""
+    if strategy is not None:
+        choice = "use-global" if strategy == "prefer-global" else "use-project"
+        return [(row, choice) for row in conflicts]
+    if not sys.stdin.isatty():
+        raise SystemExit(
+            "klm: resolving conflicts needs a terminal, or --strategy "
+            "prefer-global|prefer-project"
+        )
+
+    decisions: list[tuple[SyncRow, str]] = []
+    for row in conflicts:
+        print(f"\n{_FAIL} {row.mpn or row.symbol_name}")
+        print(f"    {row.detail}")
+        answer = input("    use-global / use-project / skip? [skip] ").strip() or "skip"
+        while answer not in ("use-global", "use-project", "skip"):
+            answer = input("    use-global / use-project / skip? [skip] ").strip() or "skip"
+        decisions.append((row, answer))
+    return decisions
+
+
+def cmd_sync_adopt(args: argparse.Namespace) -> int:
+    paths, project = _open_project(args)
+    conn = connect(paths.db, create=False)
+    try:
+        report = adopt(
+            conn,
+            AssetStore(paths.assets),
+            project,
+            library_name=args.name,
+            dry_run=args.dry_run,
+        )
+    finally:
+        conn.close()
+
+    verb = "would rebuild" if args.dry_run else "rebuilt"
+    print(f"{_OK} {verb} the lock from {len(report.matched)} matched symbol(s)")
+    for name, klm_id in report.matched:
+        print(f"    {name} → {klm_id}")
+    for name in report.unmatched:
+        print(f"{_WARN} {name}: no catalog part matches — it will report as an orphan")
+    return EXIT_OK
+
+
+def cmd_promote(args: argparse.Namespace) -> int:
+    paths, project = _open_project(args)
+    conn = connect(paths.db, create=False)
+    try:
+        try:
+            _require_vendored(project)
+            report = promote(
+                conn,
+                AssetStore(paths.assets),
+                project,
+                args.reference,
+                category=args.category,
+                dry_run=args.dry_run,
+            )
+        except VendorError as exc:
+            print(f"{_FAIL} {exc}")
+            return EXIT_CHECK_FAILED
+    finally:
+        conn.close()
+
+    verb = "would promote" if args.dry_run else "promoted"
+    print(f"{_OK} {verb} {report.symbol_name} → {report.mpn} ({report.klm_id})")
+    for kind, qa in sorted(report.qa.items(), key=lambda item: str(item[0])):
+        _print_qa(str(kind), qa)
+    if not args.dry_run:
+        print(f"\n{_INFO} it landed as a draft — review it, then approve")
     return EXIT_OK
 
 

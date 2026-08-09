@@ -67,6 +67,8 @@ class AssetOrigin:
     GENERATED = "generated"
     IMPORTED = "imported:kicad-file"
     HAND = "hand-drawn"
+    PROJECT = "project"
+    """Taken back out of a project by `klm sync push` or `klm promote`."""
 
 
 #: What KiCad's own library exception amounts to, recorded on every asset taken

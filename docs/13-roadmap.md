@@ -95,8 +95,21 @@ symbol and `klm import --from-kicad`.
 - `klm promote`
 - Determinism test: vendor twice, zero diff
 
-**Done when:** a project vendors, is cloned fresh on another machine, opens correctly with no
-setup, and a collaborator's added part promotes back into the catalog.
+**Done when:** ~~a project vendors, is cloned fresh on another machine, opens correctly with no
+setup~~ — a project vendors, re-vendors to a zero-byte diff, unvendors back to the byte it started
+from, and a collaborator's added part promotes back into the catalog.
+
+The "opens correctly on another machine" half moves to Phase 6, where it belongs and where it can
+actually be answered. klm cannot tell `power:GND` — which ships with every KiCad install — from
+`Passive:0R_0603` — which is the author's own library — without either a version-dependent list or
+a probe of the local environment, and the second is the trap
+[ADR-0007](adr/0007-clean-room-verification.md) exists to close. So vendoring claims what it can
+prove and reports the rest; `klm verify --clean-room` answers the question by resolving the project
+on a machine that has nothing. See [ADR-0010](adr/0010-vendoring-leaves-unmanaged-libraries-linked.md).
+
+One addition the original plan had no answer for: `klm vendor --from-library NICKNAME` is the
+adoption path for projects that predate klm and reference their own libraries. Without it the
+feature only worked on projects that were klm-linked from the start, which is none of them.
 
 *Solves [P6](01-vision-and-problems.md#p6--global-libraries-and-project-libraries-pull-in-opposite-directions),
 the hardest problem. Sequenced here because it depends on stable identity, assets and hashing —

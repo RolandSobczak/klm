@@ -4,13 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-Phases 0–3 of `docs/13-roadmap.md` are implemented: file handling, the store, the catalog and its
+Phases 0–4 of `docs/13-roadmap.md` are implemented: file handling, the store, the catalog and its
 git mirror, library generation and KiCad registration, the field schema, value normalization,
 `klm lint` and the pre-commit hook, the supplier layer (TME, LCSC, offers, matching, `klm refresh`
-/ `klm offers`, lint group P), and the asset pipeline (packages, symbol templates, chip land
-patterns, KiCad standard-library reuse, the QA gate, FreeCAD mesh→STEP, `klm part add`,
-`klm assets *`). **Q1 and Q2 are resolved; Q4 was checked and is still open** (see below).
-Phase 4 (library sync) is next and nothing blocks it.
+/ `klm offers`, lint group P), the asset pipeline (packages, symbol templates, chip land patterns,
+KiCad standard-library reuse, the QA gate, FreeCAD mesh→STEP, `klm part add`, `klm assets *`), and
+library sync (`klm vendor` / `unvendor`, the lock file, `klm sync status|pull|push|resolve|adopt`,
+`klm promote`). **Q1 and Q2 are resolved; Q4 was checked, is still open, and no longer blocks
+Phase 4** (see below). Phase 5 (fabrication) is next; **Q3 blocks part of it**.
 
 - `README.md` — entry point and documentation map
 - `docs/01`–`docs/15` — the design, one concern per document
@@ -107,6 +108,21 @@ These are the things that will bite an implementer who hasn't read the docs.
   `draft` that must pass asset QA and lint. See `docs/adr/0006`.
 - **Generated output must be byte-stable.** Vendor twice with no changes → `git diff --exit-code`
   passes. Fixed float precision, sorted fields, no incidental timestamps.
+- **The global library and a vendored one are built by one function.** `services/library.py`
+  `build_library` produces both; `generate` and `vendor` only differ in a `Layout`. Sync compares
+  the hash of a vendored asset against the same asset rebuilt from the catalog, so if the two
+  builders drifted by so much as a field order, every part would read as `conflict` forever.
+- **A vendored asset's hash is deliberately not its catalog hash.** The symbol was renamed and
+  re-fielded; the footprint's model path points inside the project. Only the *recorded vs current*
+  comparison on each side is meaningful — comparing global against vendored is not.
+- **A cached `lib_symbols` unit is named after the bare symbol name**, not `LIB:NAME`. Prefixing it
+  with the parent's full new name yields `NewLib:Part_Part_1_1`, which KiCad loads and renders as
+  nothing. Found on a real schematic, not a fixture; `schematic._rename_cached` is where it lives.
+- **Vendoring aborts only on klm's own unresolved symbols.** A `lib_id` from a library klm does not
+  manage (`power:GND`, `Device:R`) is reported and left linked, because one real schematic carries
+  dozens and aborting would push every user to `--allow-unresolved`. The consequence is that
+  `klm vendor` does *not* establish self-containment — `klm verify --clean-room` does. See
+  `docs/adr/0010`.
 - **`klm verify --clean-room` must run with no catalog and no configuration.** It is a separate
   code path from `klm lint` (which assumes the catalog), because its whole job is to behave like a
   stranger's machine. Self-containment is defined by that check passing in CI, not by the project
@@ -116,7 +132,7 @@ These are the things that will bite an implementer who hasn't read the docs.
 ## Before building anything
 
 `docs/14-open-questions.md` is the risk register. Q1 and Q2 are resolved (2026-08-09); Q3–Q6
-remain and block later phases.
+remain. **Q3 (JLCPCB rotation correction data) is the one to check before starting Phase 5.**
 
 - **Q1 — resolved.** TME's auth is signature-based, not OAuth: HMAC-SHA1 over
   `POST&<enc URL>&<enc sorted query>`, base64, sent as `ApiSignature`. Still unverified: published
@@ -128,7 +144,10 @@ remain and block later phases.
 - **Q4 — checked, still open, and the finding is that there is no finding.** Nothing published
   addresses redistribution of EasyEDA-derived library assets. An absent answer is not a permissive
   one, so **the EasyEDA importer was dropped from Phase 3** rather than written and disabled —
-  ADR-0009 independently rules it out anyway. Do not add it without answering Q4 first.
+  ADR-0009 independently rules it out anyway. Do not add it without answering Q4 first. It stopped
+  blocking Phase 4 for the same reason: vendoring copies catalog assets into a public repository,
+  but there are no unclear-status assets to copy — everything klm holds comes from KiCad's
+  libraries or its own generators.
 
 ## Roadmap
 
