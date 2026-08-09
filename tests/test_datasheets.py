@@ -232,3 +232,47 @@ def test_explain_says_what_happened_to_every_parameter(datasheet) -> None:  # ty
     assert 'p.3: "VIN 1.8 to 6.5 V"' in lines
     assert "Iq = 60 nA — no citation, dropped" in lines
     assert "Tj max: not found in the datasheet" in lines
+
+
+# ---------------------------------------------------------------------------
+# Question and answer
+# ---------------------------------------------------------------------------
+
+
+def test_an_answer_carries_what_it_quoted(datasheet) -> None:  # type: ignore[no-untyped-def]
+    from klm.services.datasheets import ask
+
+    reader = FakeReader(cited("It runs from 1.8 V.", "VIN 1.8 to 6.5 V", page=3))
+
+    answer = ask(datasheet, "What is the minimum input voltage?", reader)
+
+    assert answer.text == "It runs from 1.8 V."
+    assert answer.grounded
+    assert answer.citations[0].page == 3
+
+
+def test_an_answer_that_quotes_nothing_says_so(datasheet) -> None:  # type: ignore[no-untyped-def]
+    """Not a claim that it is wrong — a statement of what it rests on."""
+    from klm.services.datasheets import ask
+
+    answer = ask(datasheet, "Is it any good?", FakeReader(Segment("Probably.")))
+
+    assert answer.text == "Probably."
+    assert not answer.grounded
+
+
+def test_an_empty_question_calls_no_model(datasheet) -> None:  # type: ignore[no-untyped-def]
+    from klm.services.datasheets import ask
+
+    reader = FakeReader()
+    answer = ask(datasheet, "   ", reader)
+
+    assert answer.note and reader.messages == []
+
+
+def test_a_model_failure_is_reported_rather_than_answered(datasheet) -> None:  # type: ignore[no-untyped-def]
+    from klm.services.datasheets import ask
+
+    answer = ask(datasheet, "Vin?", FakeReader(error=LlmError("Overloaded")))
+
+    assert answer.text == "" and "Overloaded" in answer.note

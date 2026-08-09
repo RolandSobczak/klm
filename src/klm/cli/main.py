@@ -439,6 +439,19 @@ def _add_research_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParse
     review.add_argument("--format", choices=("text", "json"), default="text")
     review.set_defaults(func=cmd_research_review)
 
+    asking = sub.add_parser("ask", help="Ask a question of a part's datasheet.")
+    asking.add_argument("target", metavar="URL_OR_PART")
+    asking.add_argument("question")
+    asking.set_defaults(func=cmd_ask)
+
+    subs = sub.add_parser("substitutes", help="What else in the catalog could go on the board.")
+    subs.add_argument("part", metavar="ID_OR_MPN")
+    subs.add_argument(
+        "--all", action="store_true", help="Include candidates klm found differences in."
+    )
+    subs.add_argument("--format", choices=("text", "json"), default="text")
+    subs.set_defaults(func=cmd_substitutes)
+
     sheet = sub.add_parser("datasheet", help="Fetch a datasheet, or read parameters out of one.")
     sheet_actions = sheet.add_subparsers(dest="action", metavar="ACTION", required=True)
 
@@ -3318,6 +3331,105 @@ def cmd_datasheet_extract(args: argparse.Namespace) -> int:
     if result.note:
         print(f"{_WARN} {result.note}")
     return EXIT_OK if result.parameters else EXIT_CHECK_FAILED
+
+
+def cmd_ask(args: argparse.Namespace) -> int:
+    """Ask a question of a datasheet, and say what the answer rests on."""
+    from klm.llm.client import EXTRACTION_MODEL, AnthropicClient, LlmUnavailable
+    from klm.services.datasheets import DatasheetError, ask, fetch
+
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    url, title = _datasheet_url(args, paths)
+    if url is None:
+        return EXIT_CHECK_FAILED
+
+    try:
+        client = AnthropicClient(model=EXTRACTION_MODEL, max_tokens=4000)
+    except LlmUnavailable as exc:
+        print(f"{_FAIL} {exc}")
+        return EXIT_CHECK_FAILED
+
+    try:
+        datasheet = fetch(url, paths.datasheet_cache)
+    except DatasheetError as exc:
+        print(f"{_FAIL} {exc}")
+        return EXIT_CHECK_FAILED
+
+    answer = ask(datasheet, args.question, client, title=title)
+    if answer.note:
+        print(f"{_FAIL} {answer.note}")
+        return EXIT_CHECK_FAILED
+
+    print(answer.text)
+    for citation in answer.citations:
+        print(f"  {_INFO} {citation}")
+    if not answer.grounded:
+        # Not a claim that it is wrong — a statement of what it rests on.
+        print(f"{_WARN} this answer quotes nothing from the datasheet; treat it as unsupported")
+    return EXIT_OK
+
+
+def cmd_substitutes(args: argparse.Namespace) -> int:
+    """What else in the catalog could go on the board instead.
+
+    Compatibility here is mechanical — same land pattern, same pinout — and
+    `unchecked` is a real answer: a part whose symbol or footprint klm cannot
+    read has not been found compatible, it has not been compared.
+    """
+    from klm.services.substitutes import find_substitutes
+
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        part = _resolve_part(conn, args.part)
+        candidates = find_substitutes(
+            conn, AssetStore(paths.assets), part, include_differing=args.all
+        )
+    finally:
+        conn.close()
+
+    if args.format == "json":
+        print(json.dumps([
+            {
+                "klm_id": c.part.klm_id,
+                "mpn": c.part.mpn,
+                "manufacturer": c.part.manufacturer,
+                "status": c.compatibility.status,
+                "footprint": c.compatibility.footprint,
+                "pins": c.compatibility.pins,
+                "differences": c.compatibility.differences,
+                "notes": c.compatibility.notes,
+                "stock": c.stock,
+                "unit_price": c.unit_price,
+                "currency": c.currency,
+                "suppliers": list(c.suppliers),
+            }
+            for c in candidates
+        ], indent=2))
+        return EXIT_OK if candidates else EXIT_CHECK_FAILED
+
+    for candidate in candidates:
+        mark = {"compatible": _OK, "differs": _WARN, "unchecked": _INFO}[
+            candidate.compatibility.status
+        ]
+        price = (
+            f"{candidate.unit_price:.4g} {candidate.currency}" if candidate.unit_price else "—"
+        )
+        print(
+            f"{mark} {candidate.part.mpn:<24} {candidate.part.manufacturer:<18} "
+            f"stock {candidate.stock:<5} {price}"
+        )
+        for line in candidate.compatibility.explain():
+            print(f"      {line}")
+    if not candidates:
+        print(f"{_INFO} nothing in the catalog shares {part.mpn}'s package or category")
+        if not args.all:
+            print("  --all also shows candidates klm found differences in")
+        return EXIT_CHECK_FAILED
+    print(f"{_INFO} pin compatibility is mechanical; whether it fits the circuit is not")
+    return EXIT_OK
 
 
 # ---------------------------------------------------------------------------

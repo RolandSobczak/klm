@@ -22,7 +22,10 @@ check`), the first four agent tools (`klm.research.tools`, `klm research tools`)
 loop itself (`klm.llm.client`, `klm.research.agent`, `klm research run`), and the datasheet cache
 with cited extraction (`klm.services.datasheets`, `klm datasheet fetch|extract`), and the
 proposal queue with its review screen (`klm.services.proposals`, `klm research review`,
-`/api/proposals*`). Next: datasheet Q&A and substitute finding — the last Phase 9 item.
+`/api/proposals*`), and datasheet Q&A with substitute finding (`klm ask`, `klm substitutes`).
+**Every Phase 9 item is built.** Its done-criterion is *not* demonstrated: it needs a live
+Anthropic key and live TME credentials, and this machine has neither — nothing in the agent or
+the TME v2 adapter has ever reached a real API.
 
 - `README.md` — entry point and documentation map
 - `docs/01`–`docs/15` — the design, one concern per document
@@ -129,6 +132,14 @@ These are the things that will bite an implementer who hasn't read the docs.
 - **Preference scores are relative to the candidate set**, and a preference a candidate is silent
   about is dropped from its average rather than scored zero — scoring it zero punishes a part for
   a field klm never fetched. Ranking a single candidate is meaningless by construction.
+- **Pin compatibility is mechanical, and `unchecked` is a real answer.** `services/substitutes.py`
+  compares land patterns (quantised pad geometry) and pinouts (number → name → electrical type).
+  Pin *names* are compared, not just numbers and types: two parts can share a footprint and a
+  type map while pin 3 is `EN` on one and `GND` on the other. A missing asset is `unchecked`,
+  never `compatible` — the QA gate's rule, where getting it wrong puts the wrong part on a board.
+- **`klm ask` reports whether an answer quoted the datasheet at all.** Prose Q&A cannot demand a
+  citation per sentence without losing the useful answers, so the honest move is to make an
+  ungrounded answer visibly ungrounded rather than indistinguishable from a grounded one.
 - **"No invented MPNs" is a function, not a prompt line.** `research/tools.py`'s `Ledger` records
   every part number a tool *returned*; `propose_part` refuses one that is not in it. Same for a
   parameter's quote: one klm never read in a datasheet is dropped from the proposal and named.

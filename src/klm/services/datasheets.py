@@ -41,11 +41,13 @@ from typing import Any
 from klm.llm.client import Citation, LlmError, ModelClient, Usage
 
 __all__ = [
+    "Answer",
     "BinaryTransport",
     "Datasheet",
     "DatasheetError",
     "ExtractedParameter",
     "Extraction",
+    "ask",
     "extract",
     "fetch",
     "load",
@@ -285,6 +287,71 @@ def extract(
     cited_or_dropped = set(seen) | {name for name, _ in result.uncited}
     result.missing = [name for name in wanted if name not in cited_or_dropped]
     return result
+
+
+@dataclass
+class Answer:
+    """A question answered against a datasheet, and what it rests on."""
+
+    text: str = ""
+    citations: list[Citation] = field(default_factory=list)
+    usage: Usage = field(default_factory=Usage)
+    note: str = ""
+
+    @property
+    def grounded(self) -> bool:
+        """Whether anything in the answer was quoted from the document.
+
+        Not a verdict on correctness — a grounded answer can still be wrong.
+        But an answer that cites *nothing* is the model talking about the part
+        rather than reading about it, and a reader deserves to know which one
+        they are looking at.
+        """
+        return bool(self.citations)
+
+
+_ASK_SYSTEM = """\
+You answer questions about a component from its datasheet, for an engineer who \
+is about to put the part on a board. Quote the passages your answer rests on. \
+Answer in a few sentences; if the datasheet does not address the question, say \
+so plainly rather than reasoning from what parts like this usually do."""
+
+
+def ask(
+    datasheet: Datasheet,
+    question: str,
+    client: ModelClient,
+    *,
+    title: str | None = None,
+) -> Answer:
+    """Ask one question of a datasheet.
+
+    Looser than :func:`extract` on purpose: a question has a prose answer, and
+    demanding a citation per sentence would make the useful answers
+    unavailable. What klm does instead is *report* whether the answer cited
+    anything at all, so an ungrounded one is visibly ungrounded.
+    """
+    if not question.strip():
+        return Answer(note="no question was asked")
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                datasheet.document_block(title=title),
+                {"type": "text", "text": question.strip()},
+            ],
+        }
+    ]
+    try:
+        reply = client.reply(system=_ASK_SYSTEM, messages=messages, tools=[])
+    except LlmError as exc:
+        return Answer(note=str(exc))
+
+    citations: list[Citation] = []
+    for segment in reply.segments or ():
+        citations.extend(segment.citations)
+    return Answer(text=reply.text, citations=citations, usage=reply.usage)
 
 
 def _lines(text: str) -> list[tuple[str, str]]:

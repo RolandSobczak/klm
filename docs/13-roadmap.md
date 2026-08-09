@@ -276,10 +276,21 @@ the agent:
   evidence; approving runs the phase-3 pipeline and produces a **draft**.
 - **Guardrails, logging, cost metering** *(done with the loop)* — they are the loop's
   structure rather than a layer on top of it: `Limits`, `Pricing`, and `event_log`.
-- Datasheet Q&A; substitute finding
+- **Datasheet Q&A; substitute finding** *(done)* — `klm ask` answers against a cached PDF and
+  says whether the answer quoted anything; `klm substitutes` finds pin-compatible catalog parts
+  mechanically (`klm.services.substitutes`), reporting `differs` with the differences and
+  `unchecked` when an asset is missing.
 
 **Done when:** a stated requirement yields three cited, in-stock candidates, and approving one
 runs the phase-3 pipeline to a reviewable draft part.
+
+**Every item above is built; the done-criterion is not yet demonstrated.** It needs a live
+Anthropic key and live TME credentials, and this machine has neither — no request from the agent
+or from the TME v2 adapter has ever reached a real API. Each piece is tested against a fake
+model and a pinned copy of TME's published specification, which pins the *contract* rather than
+the *server*. Treat a field-name mismatch on first real use as expected work, not a regression;
+the second half of the criterion (approve → phase-3 pipeline → draft part) *is* demonstrated, in
+`tests/test_proposals.py`.
 
 *Solves [P7](01-vision-and-problems.md#p7--finding-the-right-part-in-the-first-place). Last
 because it's the phase that most benefits from everything else existing: the agent's best tool is
@@ -289,7 +300,8 @@ attached to nothing.*
 
 ## Later, unscheduled
 
-- Substitute management with mechanical pin-compatibility checking
+- Substitute *management* — recording an approved substitution against a part, so a BOM can use
+  it. The mechanical compatibility check itself shipped with phase 9 (`klm substitutes`)
 - Multi-board projects (panelization, motherboard/daughterboard sets)
 - Additional supplier adapters (Mouser/DigiKey as parametric search only; Botland, Kamami)
 - KiCad IPC API integration — push a part into a running KiCad session ([Q5](14-open-questions.md#q5))
