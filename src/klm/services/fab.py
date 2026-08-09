@@ -36,6 +36,7 @@ from klm import __version__
 from klm.cad.kicadcli import KiCadCli, KiCadCliError, KiCadCliUnavailable
 from klm.config import Config
 from klm.fab.profiles import JLCPCB, FabProfile, Placement, render_csv
+from klm.fab.timestamps import normalize_directory
 from klm.kicad import board as pcb
 from klm.kicad import footprints as fp
 from klm.kicad.project import KiCadProject
@@ -99,6 +100,9 @@ class FabReport:
     bom: BomReport | None = None
     placements: list[Placement] = field(default_factory=list)
     written: bool = False
+    gerber_dir: Path | None = None
+    normalized: int = 0
+    """Files whose generation timestamp was replaced, for reproducibility."""
     unconfirmed: list[str] = field(default_factory=list)
     """References whose rotation no physical board has confirmed (ADR-0011)."""
 
@@ -484,6 +488,7 @@ def fab_package(
     allow_dirty: bool = False,
     cli: KiCadCli | None = None,
     timestamp: bool = True,
+    normalize_timestamps: bool = False,
 ) -> FabReport:
     """Run the pipeline. Writes nothing unless preflight passes."""
     cli = cli or KiCadCli()
@@ -516,6 +521,15 @@ def fab_package(
             return report
 
         _build(conn, cli, project, bom, profile, work, report, assembly=assembly)
+        if normalize_timestamps:
+            # KiCad writes the wall clock into every gerber and drill header and
+            # honours no override, so two runs of one commit differ until this
+            # rewrites them (docs/14 Q11). It has to happen before the zip, or
+            # the archive preserves exactly what we came to remove.
+            report.normalized = normalize_directory(work)
+        if report.gerber_dir is not None:
+            _zip_directory(report.gerber_dir, work / "gerbers.zip")
+            shutil.rmtree(report.gerber_dir, ignore_errors=True)
         _write_manifest(work, project, report, variant, cli, timestamp=timestamp)
         _write_readme(work, project, report, variant)
 
@@ -546,8 +560,7 @@ def _build(
         project.board, gerber_dir, protel_extensions=profile.gerber_protel_extensions
     )
     cli.export_drill(project.board, work / "drill", merge_pth_npth=profile.drill_merge_pth_npth)
-    _zip_directory(gerber_dir, work / "gerbers.zip")
-    shutil.rmtree(gerber_dir, ignore_errors=True)
+    report.gerber_dir = gerber_dir
 
     if not assembly:
         return
@@ -630,6 +643,7 @@ def _write_manifest(
             for p in sorted(report.placements, key=lambda p: p.reference)
         ],
         "unconfirmed": report.unconfirmed,
+        "normalized_timestamps": report.normalized > 0,
         "preflight": [
             {"check": c.name, "status": c.status, "detail": c.detail}
             for c in report.preflight.checks

@@ -245,28 +245,48 @@ sidesteps the weakness entirely.
 
 ---
 
-## Q11 — KiCad in CI: container, headless rendering, determinism
+## Q11 — KiCad in CI: container, headless rendering, determinism — **RESOLVED** (2026-08-09)
 
-**Blocks:** Phase 6
+**Blocked:** Phase 6 · **Answer:** three of four settled, and one of them was a workflow-breaker.
 
-The CI workflows assume `kicad-cli` runs reliably in a container with no display. Several details
-are asserted in [15](15-project-scaffolding-and-ci.md) and unverified.
+**The container.** KiCad publishes official images at `kicad/kicad` (Docker Hub and GHCR), built
+from `kicad/packaging/kicad-cli-docker` and intended precisely for `kicad-cli` in CI. Tags come in
+three shapes: `9.0` tracks the latest patch, `9.0.9` pins one exactly, and `-full` variants add the
+standard symbol, footprint and 3D libraries. Current stable at the time of checking: **10.0.5**
+(Debian trixie) and **9.0.9** (bookworm). Scaffold pins an exact patch tag.
 
-**To verify:**
-- Which official KiCad container image and tag to pin, and its update cadence. An unpinned image
-  means the same commit produces different gerbers next month.
-- Whether `kicad-cli` needs an X server (`xvfb-run`) for any export path on the targeted version.
-  3D render is the usual suspect; PDF and gerber export are believed fine headless. The scaffolded
-  workflow wraps render steps defensively, which is harmless if unnecessary.
-- Exact `kicad-cli` subcommand and flag availability per version — `sch export pdf`,
-  `sch export bom`, `pcb export gerbers|drill|pos|step`, `pcb render`. These have shifted across
-  releases; verify against the pinned version rather than assuming.
-- Which Gerber/drill header fields carry timestamps, and whether zeroing them
-  (`--normalize-timestamps`) is safe for JLCPCB's parser. If it isn't, byte-reproducible artifacts
-  are off the table and artifact diffing needs a different approach.
+**The image runs as a non-root user.** Both `Dockerfile.9.0-stable` and `Dockerfile.10.0-stable`
+end with `USER $USER_NAME`. In a GitHub Actions *container job* the workspace is created by the
+runner as root, so `actions/checkout` fails on permissions before klm is ever invoked. The
+generated workflow therefore sets `options: --user root` on the container. This was not in the
+design, would have broken the first run of every scaffolded repository, and is the single most
+valuable thing this check turned up.
 
-**If wrong:** contained. Worst case the render artifact is dropped and reproducibility becomes
-best-effort; verification and fab output are unaffected.
+**`-full` is the right image, and it settles a question ADR-0010 deferred.** Clean-room
+verification asks "does this resolve on a machine that has nothing?" — but KiCad's own standard
+libraries ship *with KiCad*, so any machine that can open the project has them. The honest
+definition is therefore: no klm catalog, no klm global libraries, no user configuration, but a
+stock KiCad install. That is exactly what the `-full` image provides, and it means
+`klm verify --clean-room` can answer the `power:GND` versus `Passive:0R_0603` question by *trying
+to resolve them*, with no list to maintain and no dependence on the author's machine — which is
+what [ADR-0010](adr/0010-vendoring-leaves-unmanaged-libraries-linked.md) said Phase 6 would supply.
+
+**Gerber timestamps: KiCad offers no way out, so klm rewrites them.** `SOURCE_DATE_EPOCH` — the
+reproducible-builds standard — is **not** honoured. KiCad's `GbrMakeCreationDateAttributeString`
+reads the wall clock unconditionally (`wxDateTime date( wxDateTime::GetTimeNow() )`); there is no
+environment override of any kind. So byte-reproducible output requires post-processing the emitted
+files, which is what `klm fab --normalize-timestamps` does.
+
+The design note said it "zeroes" the timestamps, and that is what raised the parser worry. klm
+substitutes a **fixed valid** ISO-8601 timestamp instead. A well-formed `%TF.CreationDate…*%` with
+an unchanging value carries no parser risk, where a blanked field plausibly would — so the risk the
+question was really about is closed by construction rather than by testing against an upload.
+
+**Still unverified, and honestly so:** whether any `kicad-cli` export path needs an X server on
+9.0/10.0. `pcb render` remains the suspect. The scaffolded workflow wraps render steps in
+`xvfb-run` defensively, which costs nothing if unnecessary. Also unverified: the exact `kicad-cli`
+flag surface, because KiCad is not installed on the development machine — the first real CI run is
+what confirms it, and that is a known and accepted gap.
 
 ---
 

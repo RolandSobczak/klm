@@ -844,3 +844,86 @@ def test_feedback_wants_a_reference_and_a_number(home: Path, tmp_path: Path, cap
     assert main(["init"]) == EXIT_OK
     with pytest.raises(SystemExit, match="REF:DEGREES"):
         main(["fab", "feedback", str(tmp_path), "--wrong", "U3"])
+
+
+# ---------------------------------------------------------------------------
+# verify / scaffold / report
+# ---------------------------------------------------------------------------
+
+
+def test_verify_fails_a_linked_project_and_passes_a_vendored_one(
+    home: Path, tmp_path: Path, capsys
+) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+
+    assert main(["verify", "--clean-room", "--project", str(root)]) == EXIT_CHECK_FAILED
+    assert "partly vendored" in capsys.readouterr().out
+
+    assert main(["vendor", "--project", str(root)]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["verify", "--clean-room", "--project", str(root)]) == EXIT_OK
+    assert "enough to open the project" in capsys.readouterr().out
+
+
+def test_verify_github_format_emits_annotations(home: Path, tmp_path: Path, capsys) -> None:
+    """A reviewer should see the offending lib_id in the diff, not in a log."""
+    root = _vendored_project(home, tmp_path, capsys)
+    capsys.readouterr()
+
+    main(["verify", "--clean-room", "--project", str(root), "--format", "github"])
+    out = capsys.readouterr().out
+    assert out.startswith("::error")
+    assert "file=my-board.kicad_sch" in out
+
+
+def test_verify_json_format_is_machine_readable(home: Path, tmp_path: Path, capsys) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+    main(["vendor", "--project", str(root)])
+    capsys.readouterr()
+
+    main(["verify", "--clean-room", "--project", str(root), "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["failed"] is False
+    assert any(c["name"] == "symbol resolution" for c in payload["checks"])
+
+
+def test_scaffold_then_check_is_clean(home: Path, tmp_path: Path, capsys) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+    assert main(["scaffold", "--project", str(root), "--preset", "private"]) == EXIT_OK
+    capsys.readouterr()
+
+    assert (
+        main(["scaffold", "--project", str(root), "--preset", "private", "--check"]) == EXIT_OK
+    )
+    assert "matches klm" in capsys.readouterr().out
+
+
+def test_check_against_a_larger_preset_reports_what_is_missing(
+    home: Path, tmp_path: Path, capsys
+) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+    main(["scaffold", "--project", str(root), "--preset", "private"])
+    capsys.readouterr()
+
+    assert main(["scaffold", "--project", str(root), "--preset", "publish", "--check"]) == (
+        EXIT_CHECK_FAILED
+    )
+    assert "release.yml" in capsys.readouterr().out
+
+
+def test_scaffold_check_reports_drift(home: Path, tmp_path: Path, capsys) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+    main(["scaffold", "--project", str(root)])
+    (root / ".gitignore").write_text("# gutted\n", encoding="utf-8")
+    capsys.readouterr()
+
+    assert main(["scaffold", "--project", str(root), "--check"]) == EXIT_CHECK_FAILED
+    assert ".gitignore" in capsys.readouterr().out
+
+
+def test_report_renders_a_markdown_table(home: Path, tmp_path: Path, capsys) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+    assert main(["report", "--project", str(root)]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "| BOM lines | 1 |" in out
+    assert "<details>" in out

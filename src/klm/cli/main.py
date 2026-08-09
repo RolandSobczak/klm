@@ -37,6 +37,7 @@ from klm.services.assets import (
 from klm.services.bom import BomReport, Variant, extract_bom, load_variants
 from klm.services.catalog import get_part, list_parts, save_part
 from klm.services.corrections import delete_pattern, list_patterns, part_corrections, set_pattern
+from klm.services.docs import build_docs, github_summary, json_report
 from klm.services.exporter import PART_FILE, export_catalog, import_catalog
 from klm.services.fab import fab_feedback, fab_package
 from klm.services.generate import generate
@@ -52,6 +53,7 @@ from klm.services.offers import (
 )
 from klm.services.part_add import add_part
 from klm.services.register import apply_plan, plan_registration
+from klm.services.scaffold import KICAD_IMAGE, apply_scaffold, plan_scaffold
 from klm.services.sync import (
     SyncReport,
     SyncRow,
@@ -64,6 +66,7 @@ from klm.services.sync import (
     sync_status,
 )
 from klm.services.vendor import VendorError, VendorPlan, plan_vendor, unvendor, vendor
+from klm.services.verify import to_json, verify_clean_room
 from klm.store import AssetKind, AssetStore, Paths, connect, migrate
 from klm.store.db import SCHEMA_VERSION, user_version
 from klm.suppliers.lcsc import is_lcsc_pn, product_url
@@ -249,8 +252,55 @@ def build_parser() -> argparse.ArgumentParser:
 
     _add_sync_parsers(sub)
     _add_fab_parsers(sub)
+    _add_repo_parsers(sub)
 
     return parser
+
+
+def _add_repo_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    verify = sub.add_parser("verify", help="Prove a project opens for somebody else.")
+    _project_argument(verify)
+    verify.add_argument(
+        "--clean-room",
+        action="store_true",
+        help="Resolve using only the repository and a stock KiCad. The real check.",
+    )
+    verify.add_argument("--format", choices=("text", "json", "github"), default="text")
+    verify.add_argument(
+        "--require-3d", action="store_true", help="Fail if no 3D model is vendored."
+    )
+    verify.set_defaults(func=cmd_verify)
+
+    scaffold = sub.add_parser("scaffold", help="Write the repository furniture around a project.")
+    _project_argument(scaffold)
+    scaffold.add_argument("--preset", choices=("publish", "private"), default="publish")
+    scaffold.add_argument(
+        "--check",
+        action="store_true",
+        help="Report drift from this klm's templates; non-zero if any.",
+    )
+    scaffold.add_argument(
+        "--update", action="store_true", help="Regenerate, preserving edits outside the markers."
+    )
+    scaffold.set_defaults(func=cmd_scaffold)
+
+    docs = sub.add_parser("docs", help="Schematic PDF, board renders and a STEP model.")
+    _project_argument(docs)
+    docs.add_argument("--output", metavar="DIR", default="artifacts", help="Where to write them.")
+    docs.add_argument("--pdf", action="store_true")
+    docs.add_argument("--render", action="store_true")
+    docs.add_argument("--step", action="store_true")
+    docs.add_argument("--all", action="store_true", help="Everything the project supports.")
+    docs.set_defaults(func=cmd_docs)
+
+    report = sub.add_parser("report", help="A summary of the board, for a person or for CI.")
+    _project_argument(report)
+    report.add_argument("--variant", metavar="NAME")
+    report.add_argument("--package", metavar="DIR", help="A fab package to summarise alongside.")
+    report.add_argument(
+        "--format", choices=("markdown", "github-summary", "json"), default="markdown"
+    )
+    report.set_defaults(func=cmd_report)
 
 
 def _add_fab_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -275,6 +325,12 @@ def _add_fab_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -
     fab.add_argument(
         "--allow-dirty", action="store_true", help="Do not warn about uncommitted changes."
     )
+    fab.add_argument(
+        "--normalize-timestamps",
+        action="store_true",
+        help="Rewrite gerber/drill generation timestamps so two runs match byte for byte.",
+    )
+    fab.add_argument("--format", choices=("text", "github"), default="text")
     fab.add_argument(
         "--no-timestamp",
         action="store_true",
@@ -1858,14 +1914,21 @@ def cmd_fab(args: argparse.Namespace) -> int:
             check_only=args.check,
             allow_dirty=args.allow_dirty,
             timestamp=not args.no_timestamp,
+            normalize_timestamps=args.normalize_timestamps,
         )
     finally:
         conn.close()
 
-    for check in report.preflight.checks:
-        glyph = {"pass": _OK, "warn": _WARN, "fail": _FAIL}[check.status]
-        detail = f"  — {check.detail}" if check.detail else ""
-        print(f"{glyph} {check.name}{detail}")
+    if args.format == "github":
+        for check in report.preflight.checks:
+            if check.status != "pass":
+                severity = "error" if check.status == "fail" else "warning"
+                print(_annotate(severity, f"{check.name}: {check.detail or 'failed'}"))
+    else:
+        for check in report.preflight.checks:
+            glyph = {"pass": _OK, "warn": _WARN, "fail": _FAIL}[check.status]
+            detail = f"  — {check.detail}" if check.detail else ""
+            print(f"{glyph} {check.name}{detail}")
 
     if report.preflight.blocked:
         print(f"\n{_FAIL} preflight failed; no package written")
@@ -1878,6 +1941,8 @@ def cmd_fab(args: argparse.Namespace) -> int:
     print(f"\n{_OK} wrote {report.output_dir}")
     if bom:
         print(f"    {len(bom.lines)} BOM line(s), {bom.total_parts} part(s) placed")
+    if report.normalized:
+        print(f"    {report.normalized} file(s) had their timestamps normalized")
     if report.unconfirmed:
         # ADR-0011: klm bundles no rotation data, so an unconfirmed part has
         # nothing behind it. Saying so is the whole mitigation.
@@ -1972,6 +2037,147 @@ def _print_corrections(conn: sqlite3.Connection) -> int:
         print("    keyed by footprint, which cannot express two parts on one land pattern")
         print("    needing different rotations. See docs/adr/0011.")
         print("    The table fills as boards come back: klm fab feedback --confirm-rest")
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# verify / scaffold / docs / report
+# ---------------------------------------------------------------------------
+
+_GITHUB_LEVEL = {"error": "error", "warning": "warning", "info": "notice"}
+
+
+def _annotate(severity: str, message: str, *, file: str = "", line: int = 0) -> str:
+    """A GitHub Actions workflow command, so a finding lands on the right line.
+
+    The whole point of the format: a reviewer sees the offending `lib_id` in the
+    PR diff rather than having to open a log.
+    """
+    parts = []
+    if file:
+        parts.append(f"file={file}")
+    if line:
+        parts.append(f"line={line}")
+    location = f" {','.join(parts)}" if parts else ""
+    flat = message.replace("\n", " ").replace("%", "%25")
+    return f"::{_GITHUB_LEVEL.get(severity, 'notice')}{location}::{flat}"
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Deliberately does not open the catalog — see klm.services.verify."""
+    project = find_project(args.project)
+    if not args.clean_room:
+        print(f"{_INFO} klm verify currently implements --clean-room only; running that.")
+    report = verify_clean_room(project, require_3d=args.require_3d)
+
+    if args.format == "json":
+        print(to_json(report))
+    elif args.format == "github":
+        for finding in report.findings:
+            print(
+                _annotate(
+                    finding.severity, finding.message, file=finding.file, line=finding.line
+                )
+            )
+    else:
+        for name, summary in report.checks.items():
+            glyph = {"error": _FAIL, "warning": _WARN, "info": _INFO, "pass": _OK}[
+                report.status(name)
+            ]
+            print(f"{glyph} {name:<24} {summary.lstrip('~')}")
+            for finding in report.findings:
+                if finding.check == name:
+                    where = f"{finding.location}  " if finding.location else ""
+                    print(f"    {where}{finding.message}")
+        print()
+        if report.failed:
+            print(f"{_FAIL} FAILED — {report.count('error')} error(s)")
+        else:
+            print(f"{_OK} this repository is enough to open the project")
+
+    return EXIT_CHECK_FAILED if report.failed else EXIT_OK
+
+
+def cmd_scaffold(args: argparse.Namespace) -> int:
+    root = Path(args.project).expanduser().resolve()
+    variants = tuple(sorted(_project_variants(root)))
+    try:
+        plan = plan_scaffold(root, preset=args.preset, variants=variants)
+    except KeyError as exc:
+        raise SystemExit(f"klm: {exc}") from exc
+
+    if args.check:
+        for change in plan.needed:
+            print(f"{_WARN} {change.path}: would {change.action}")
+        if plan.drifted:
+            print(f"\n{_FAIL} {len(plan.needed)} file(s) differ — run: klm scaffold --update")
+            return EXIT_CHECK_FAILED
+        print(f"{_OK} scaffolding matches klm {__version__}")
+        return EXIT_OK
+
+    written = apply_scaffold(plan)
+    for change in written:
+        print(f"{_OK} {change.action}d {change.path}")
+    if not written:
+        print(f"{_OK} nothing to do — scaffolding is current")
+    else:
+        print(f"\n{_INFO} workflows pin {KICAD_IMAGE} and klm {__version__}; edits outside")
+        print("    the klm:managed markers survive --update")
+    return EXIT_OK
+
+
+def _project_variants(root: Path) -> set[str]:
+    path = root / "klm.toml"
+    if not path.is_file():
+        return set()
+    try:
+        with open(path, "rb") as handle:
+            raw = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return set()
+    variants = raw.get("variants")
+    return set(variants) if isinstance(variants, dict) else set()
+
+
+def cmd_docs(args: argparse.Namespace) -> int:
+    project = find_project(args.project)
+    wanted = (args.pdf, args.render, args.step)
+    if args.all or not any(wanted):
+        args.pdf = args.render = args.step = True
+
+    report = build_docs(
+        project,
+        Path(args.output),
+        pdf=args.pdf,
+        render=args.render,
+        step=args.step,
+    )
+    for path in report.written:
+        print(f"{_OK} {path}")
+    for name, reason in report.skipped:
+        print(f"{_WARN} {name}: {reason}")
+    # A missing artifact is a degradation, not a failure: losing the schematic
+    # PDF because the 3D render wanted an X server would be a poor trade.
+    return EXIT_OK if report.written else EXIT_CHECK_FAILED
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    project = find_project(args.project)
+    paths = Paths.resolve(args.catalog)
+    conn = connect(paths.db, create=False) if paths.exists() else None
+    try:
+        variant = _variant(project, args.variant)
+        package = Path(args.package) if args.package else None
+        if package is None:
+            default = project.root / "fab" / project.name
+            package = default if default.is_dir() else None
+        if args.format == "json":
+            print(json_report(conn, project, variant=variant, package=package))
+        else:
+            print(github_summary(conn, project, variant=variant, package=package), end="")
+    finally:
+        if conn is not None:
+            conn.close()
     return EXIT_OK
 
 
