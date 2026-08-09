@@ -784,3 +784,63 @@ def test_promote_refuses_a_part_that_is_not_an_orphan(home: Path, tmp_path: Path
 
     assert main(["promote", "RC0402FR-074K7L", "--project", str(root)]) == EXIT_CHECK_FAILED
     assert "no orphan part matches" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# bom / fab
+# ---------------------------------------------------------------------------
+
+
+def test_bom_lists_and_flags_unresolved(home: Path, tmp_path: Path, capsys) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+    assert main(["bom", "--project", str(root)]) == EXIT_OK
+    assert "RC0402FR-074K7L" not in capsys.readouterr().out  # grouped by Value
+
+
+def test_bom_json_carries_the_designators(home: Path, tmp_path: Path, capsys) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+    assert main(["bom", "--project", str(root), "--format", "json"]) == EXIT_OK
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["lines"][0]["designators"] == "R1"
+
+
+def test_an_unknown_variant_names_the_ones_that_exist(home: Path, tmp_path: Path, capsys) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+    (root / "klm.toml").write_text('[variants.basic]\ndnp = ["R1"]\n', encoding="utf-8")
+    with pytest.raises(SystemExit, match="basic"):
+        main(["bom", "--project", str(root), "--variant", "nonesuch"])
+
+
+def test_a_variant_from_the_project_toml_is_applied(home: Path, tmp_path: Path, capsys) -> None:
+    root = _vendored_project(home, tmp_path, capsys)
+    (root / "klm.toml").write_text('[variants.basic]\ndnp = ["R1"]\n', encoding="utf-8")
+    assert main(["bom", "--project", str(root), "--variant", "basic"]) == EXIT_OK
+    assert "not populated" in capsys.readouterr().out
+
+
+def test_an_empty_correction_table_explains_itself(home: Path, capsys) -> None:
+    """ADR-0011: empty is the expected state, and an empty screen reads as a bug."""
+    assert main(["init"]) == EXIT_OK
+    capsys.readouterr()
+    assert main(["fab", "corrections", "list"]) == EXIT_OK
+    out = capsys.readouterr().out
+    assert "no corrections recorded yet" in out
+    assert "adr/0011" in out
+
+
+def test_corrections_can_be_set_and_removed(home: Path, capsys) -> None:
+    assert main(["init"]) == EXIT_OK
+    capsys.readouterr()
+
+    assert main(["fab", "corrections", "set", "^SOT-23", "180"]) == EXIT_OK
+    assert main(["fab", "corrections", "list"]) == EXIT_OK
+    assert "^SOT-23" in capsys.readouterr().out
+
+    assert main(["fab", "corrections", "remove", "^SOT-23"]) == EXIT_OK
+    assert main(["fab", "corrections", "remove", "^SOT-23"]) == EXIT_CHECK_FAILED
+
+
+def test_feedback_wants_a_reference_and_a_number(home: Path, tmp_path: Path, capsys) -> None:
+    assert main(["init"]) == EXIT_OK
+    with pytest.raises(SystemExit, match="REF:DEGREES"):
+        main(["fab", "feedback", str(tmp_path), "--wrong", "U3"])

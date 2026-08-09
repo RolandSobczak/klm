@@ -45,7 +45,7 @@ def join_lib_id(nickname: str, name: str) -> str:
 
 @dataclass(frozen=True)
 class SymbolInstance:
-    """One symbol placed on a sheet, with the facts vendoring needs."""
+    """One symbol placed on a sheet, with the facts vendoring and the BOM need."""
 
     lib_id: str
     reference: str
@@ -53,6 +53,20 @@ class SymbolInstance:
     footprint: str | None
     sheet: str = ""
     """Which file it was found in, so a report can point at the right sheet."""
+    value: str = ""
+    dnp: bool = False
+    """KiCad 7+'s native do-not-populate flag. Honoured, never inferred."""
+    in_bom: bool = True
+    on_board: bool = True
+    unit: int = 1
+    references: tuple[str, ...] = ()
+    """Every reference this symbol resolves to, from its ``instances`` block.
+
+    A sheet used twice in a hierarchy places one symbol node and two parts on
+    the board. Counting the node once would under-order every hierarchical
+    design by exactly the amount that is hardest to notice.
+    """
+    properties: tuple[tuple[str, str], ...] = ()
 
     @property
     def library(self) -> str:
@@ -61,6 +75,22 @@ class SymbolInstance:
     @property
     def name(self) -> str:
         return split_lib_id(self.lib_id)[1]
+
+    @property
+    def is_power(self) -> bool:
+        """Power flags, ground symbols and other virtual parts.
+
+        KiCad marks them by a reference beginning with ``#``, and they are not
+        components: they carry no BOM line and nothing is placed for them.
+        """
+        return self.reference.startswith("#")
+
+    def field(self, name: str) -> str:
+        return dict(self.properties).get(name, "")
+
+    def bom_references(self) -> tuple[str, ...]:
+        """The references this symbol contributes, hierarchy included."""
+        return self.references or ((self.reference,) if self.reference else ())
 
 
 def _property_value(node: SExp, name: str) -> str | None:
@@ -129,9 +159,66 @@ def iter_symbol_instances(doc: Document | SExp, *, sheet: str = "") -> list[Symb
                 klm_id=klm_id or None,
                 footprint=_property_value(node, "Footprint") or None,
                 sheet=sheet,
+                value=_property_value(node, "Value") or "",
+                dnp=_flag(node, "dnp", default=False),
+                in_bom=_flag(node, "in_bom", default=True),
+                on_board=_flag(node, "on_board", default=True),
+                unit=_unit(node),
+                references=_instance_references(node),
+                properties=_all_properties(node),
             )
         )
     return instances
+
+
+def _flag(node: SExp, name: str, *, default: bool) -> bool:
+    """Read a ``(name yes|no)`` flag. An absent flag keeps the default.
+
+    KiCad omits these on older files, and reading absence as ``no`` would drop
+    every symbol in a KiCad 6 schematic out of the BOM.
+    """
+    child = node.find(name, recursive=False)
+    if child is None or len(child) < 2 or not isinstance(child[1], Atom):
+        return default
+    return child[1].value == "yes"
+
+
+def _unit(node: SExp) -> int:
+    child = node.find("unit", recursive=False)
+    if child is not None and len(child) >= 2 and isinstance(child[1], Atom):
+        try:
+            return int(child[1].value)
+        except ValueError:
+            return 1
+    return 1
+
+
+def _instance_references(node: SExp) -> tuple[str, ...]:
+    """Every reference designator this symbol is instantiated as.
+
+    A sheet reused in a hierarchy gives one symbol node several references, one
+    per instance path. Deduplicated and sorted so a BOM is stable.
+    """
+    block = node.find("instances", recursive=False)
+    if block is None:
+        return ()
+    found: set[str] = set()
+    for path in block.find_all("path"):
+        reference = path.find("reference", recursive=False)
+        if reference is not None and len(reference) >= 2 and isinstance(reference[1], Atom):
+            found.add(reference[1].value)
+    return tuple(sorted(found))
+
+
+def _all_properties(node: SExp) -> tuple[tuple[str, str], ...]:
+    out: list[tuple[str, str]] = []
+    for child in node.children:
+        if not isinstance(child, SExp) or child.name != "property" or len(child) < 3:
+            continue
+        key, value = child[1], child[2]
+        if isinstance(key, Atom) and isinstance(value, Atom):
+            out.append((key.value, value.value))
+    return tuple(out)
 
 
 def rewrite_lib_ids(doc: Document | SExp, mapping: dict[str, str]) -> int:

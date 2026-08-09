@@ -14,6 +14,7 @@ import json
 import os
 import sqlite3
 import sys
+import tomllib
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from klm.assets.qa import QaReport, QaStatus, check_model3d
 from klm.cad.freecad import FreeCadUnavailable, convert_mesh
 from klm.config import Config, load_config
 from klm.environment import find_kicad_config, probe_all
+from klm.fab.profiles import GENERIC, profile_for, render_csv
 from klm.hooks import HOOK_BLOCK, HOOK_ID, PRE_COMMIT_CONFIG, PRE_COMMIT_TEMPLATE
 from klm.kicad.project import LOCK_FILE, KiCadProject, find_project
 from klm.model import Confidence, Offer, Part, PartStatus, PriceBreak
@@ -32,8 +34,11 @@ from klm.services.assets import (
     reuse_candidates,
     run_qa,
 )
+from klm.services.bom import BomReport, Variant, extract_bom, load_variants
 from klm.services.catalog import get_part, list_parts, save_part
+from klm.services.corrections import delete_pattern, list_patterns, part_corrections, set_pattern
 from klm.services.exporter import PART_FILE, export_catalog, import_catalog
+from klm.services.fab import fab_feedback, fab_package
 from klm.services.generate import generate
 from klm.services.importer import import_symbol_library
 from klm.services.lint import RULES, LintReport, Selector, Severity, lint_catalog
@@ -243,8 +248,71 @@ def build_parser() -> argparse.ArgumentParser:
     reg.set_defaults(func=cmd_register)
 
     _add_sync_parsers(sub)
+    _add_fab_parsers(sub)
 
     return parser
+
+
+def _add_fab_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    bom = sub.add_parser("bom", help="Extract the bill of materials from a project.")
+    _project_argument(bom)
+    bom.add_argument("--variant", metavar="NAME", help="Build variant from the project klm.toml.")
+    bom.add_argument("--format", choices=("text", "csv", "json"), default="text")
+    bom.set_defaults(func=cmd_bom)
+
+    fab = sub.add_parser("fab", help="Build a fabrication package, or check one could be.")
+    fab_actions = fab.add_subparsers(dest="action", metavar="ACTION")
+    _project_argument(fab)
+    fab.add_argument("--variant", metavar="NAME", help="Build variant from the project klm.toml.")
+    fab.add_argument("--profile", default="jlcpcb", help="Fab profile (default: jlcpcb).")
+    fab.add_argument("--output", metavar="DIR", help="Where to write the package.")
+    fab.add_argument(
+        "--check", action="store_true", help="Run preflight only; write nothing. For CI."
+    )
+    fab.add_argument(
+        "--no-assembly", action="store_true", help="Bare boards: gerbers and drill only."
+    )
+    fab.add_argument(
+        "--allow-dirty", action="store_true", help="Do not warn about uncommitted changes."
+    )
+    fab.add_argument(
+        "--no-timestamp",
+        action="store_true",
+        help="Omit generated_at from the manifest, for byte-reproducible artifacts.",
+    )
+    fab.set_defaults(func=cmd_fab)
+
+    feedback = fab_actions.add_parser(
+        "feedback", help="Record how a physical board actually came back."
+    )
+    feedback.add_argument("package", metavar="DIR", help="The fab package that made the board.")
+    feedback.add_argument(
+        "--wrong",
+        metavar="REF:DEGREES",
+        action="append",
+        default=[],
+        help="A reference that was placed wrong, and by how much. Repeatable.",
+    )
+    feedback.add_argument(
+        "--confirm-rest",
+        action="store_true",
+        help="Mark every other part as verified against a real board.",
+    )
+    feedback.add_argument(
+        "--generalize",
+        action="store_true",
+        help="Also write a footprint-pattern rule. One board is one data point.",
+    )
+    feedback.set_defaults(func=cmd_fab_feedback)
+
+    fixes = fab_actions.add_parser("corrections", help="Inspect and edit the correction table.")
+    fixes.add_argument("operation", choices=("list", "set", "remove"))
+    fixes.add_argument("pattern", nargs="?", help="Footprint-name regex, for set/remove.")
+    fixes.add_argument("rotation", nargs="?", type=float, help="Degrees, for set.")
+    fixes.add_argument("--offset-x", type=float, default=0.0)
+    fixes.add_argument("--offset-y", type=float, default=0.0)
+    fixes.add_argument("--source", choices=("user", "learned", "bundled"), default="user")
+    fixes.set_defaults(func=cmd_fab_corrections)
 
 
 def _project_argument(parser: argparse.ArgumentParser) -> None:
@@ -1684,6 +1752,226 @@ def cmd_promote(args: argparse.Namespace) -> int:
         _print_qa(str(kind), qa)
     if not args.dry_run:
         print(f"\n{_INFO} it landed as a draft — review it, then approve")
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# bom / fab
+# ---------------------------------------------------------------------------
+
+
+def _project_config(project: KiCadProject) -> dict[str, object]:
+    """Read the project's own `klm.toml`, which holds its variants."""
+    path = project.root / "klm.toml"
+    if not path.is_file():
+        return {}
+    with open(path, "rb") as handle:
+        return dict(tomllib.load(handle))
+
+
+def _variant(project: KiCadProject, name: str | None) -> Variant | None:
+    if not name:
+        return None
+    raw = _project_config(project).get("variants")
+    variants = load_variants(dict(raw)) if isinstance(raw, dict) else {}
+    if name not in variants:
+        known = ", ".join(sorted(variants)) or "none defined"
+        raise SystemExit(f"klm: no variant {name!r} in {project.root / 'klm.toml'} ({known})")
+    return variants[name]
+
+
+def cmd_bom(args: argparse.Namespace) -> int:
+    paths, project = _open_project(args)
+    conn = connect(paths.db, create=False)
+    try:
+        report = extract_bom(conn, project, variant=_variant(project, args.variant))
+    finally:
+        conn.close()
+
+    if args.format == "json":
+        print(json.dumps(_bom_json(report), indent=2, ensure_ascii=False))
+        return EXIT_OK
+    if args.format == "csv":
+        print(
+            render_csv(
+                ("Comment", "Designator", "Footprint", "Quantity", "MPN", "Manufacturer"),
+                [GENERIC.bom_row(line) for line in report.lines],
+            ),
+            end="",
+        )
+        return EXIT_OK
+
+    for line in report.lines:
+        print(
+            f"  {line.quantity:>3}x  {line.value:<18} "
+            f"{line.footprint_name:<28} {line.designators}"
+        )
+    if report.excluded:
+        print(f"\n{_INFO} not populated:")
+        for line in report.excluded:
+            print(f"  {line.quantity:>3}x  {line.value:<18} {line.designators}")
+    print(f"\n{len(report.lines)} line(s), {report.total_parts} part(s)")
+    if report.unresolved:
+        print(f"{_WARN} no catalog part for: {', '.join(report.unresolved[:10])}")
+        return EXIT_CHECK_FAILED
+    return EXIT_OK
+
+
+def _bom_json(report: BomReport) -> dict[str, object]:
+    return {
+        "variant": report.variant,
+        "lines": [
+            {
+                "value": line.value,
+                "footprint": line.footprint_name,
+                "quantity": line.quantity,
+                "designators": line.designators,
+                "klm_id": line.klm_id,
+                "mpn": line.mpn,
+                "lcsc": line.lcsc,
+                "dnp": line.dnp,
+            }
+            for line in (*report.lines, *report.excluded)
+        ],
+        "unresolved": report.unresolved,
+    }
+
+
+def cmd_fab(args: argparse.Namespace) -> int:
+    paths, project = _open_project(args)
+    try:
+        profile = profile_for(args.profile)
+    except KeyError as exc:
+        raise SystemExit(f"klm: {exc}") from exc
+
+    conn = connect(paths.db, create=False)
+    try:
+        report = fab_package(
+            conn,
+            AssetStore(paths.assets),
+            load_config(paths.config),
+            project,
+            output_dir=Path(args.output) if args.output else None,
+            profile=profile,
+            variant=_variant(project, args.variant),
+            assembly=not args.no_assembly,
+            check_only=args.check,
+            allow_dirty=args.allow_dirty,
+            timestamp=not args.no_timestamp,
+        )
+    finally:
+        conn.close()
+
+    for check in report.preflight.checks:
+        glyph = {"pass": _OK, "warn": _WARN, "fail": _FAIL}[check.status]
+        detail = f"  — {check.detail}" if check.detail else ""
+        print(f"{glyph} {check.name}{detail}")
+
+    if report.preflight.blocked:
+        print(f"\n{_FAIL} preflight failed; no package written")
+        return EXIT_CHECK_FAILED
+    if args.check:
+        print(f"\n{_OK} preflight passed ({len(report.preflight.warnings)} warning(s))")
+        return EXIT_OK
+
+    bom = report.bom
+    print(f"\n{_OK} wrote {report.output_dir}")
+    if bom:
+        print(f"    {len(bom.lines)} BOM line(s), {bom.total_parts} part(s) placed")
+    if report.unconfirmed:
+        # ADR-0011: klm bundles no rotation data, so an unconfirmed part has
+        # nothing behind it. Saying so is the whole mitigation.
+        print(f"{_WARN} rotation unconfirmed for {len(report.unconfirmed)} reference(s):")
+        print(f"      {', '.join(report.unconfirmed[:12])}")
+        print("      → check the fab's DFM preview, then: klm fab feedback")
+    return EXIT_OK
+
+
+def cmd_fab_feedback(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+
+    wrong: dict[str, float] = {}
+    for item in args.wrong:
+        reference, _, degrees = item.partition(":")
+        try:
+            wrong[reference.strip()] = float(degrees)
+        except ValueError:
+            raise SystemExit(f"klm: --wrong wants REF:DEGREES, got {item!r}") from None
+
+    conn = connect(paths.db, create=False)
+    try:
+        report = fab_feedback(
+            conn,
+            Path(args.package),
+            wrong=wrong,
+            confirm_rest=args.confirm_rest,
+            generalize=args.generalize,
+        )
+    finally:
+        conn.close()
+
+    for reference, mpn, degrees in report.corrected:
+        print(f"{_OK} {reference} ({mpn}): corrected by {degrees:g}°")
+    for pattern, degrees in report.generalized:
+        print(f"{_INFO} generalized to {pattern} = {degrees:g}°")
+    if report.confirmed:
+        print(f"{_OK} confirmed {len(report.confirmed)} part(s) against this board")
+    for reference in report.unknown:
+        print(f"{_WARN} {reference} is not in this package")
+    return EXIT_CHECK_FAILED if report.unknown else EXIT_OK
+
+
+def cmd_fab_corrections(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        if args.operation == "list":
+            return _print_corrections(conn)
+        if args.pattern is None:
+            raise SystemExit("klm: this needs a footprint pattern")
+        if args.operation == "remove":
+            removed = delete_pattern(conn, args.pattern)
+            print(f"{_OK} removed {args.pattern}" if removed else f"{_WARN} no such pattern")
+            return EXIT_OK if removed else EXIT_CHECK_FAILED
+        if args.rotation is None:
+            raise SystemExit("klm: set needs a rotation in degrees")
+        set_pattern(
+            conn,
+            args.pattern,
+            args.rotation,
+            offset_x=args.offset_x,
+            offset_y=args.offset_y,
+            source=args.source,
+        )
+        print(f"{_OK} {args.pattern} = {args.rotation:g}° ({args.source})")
+        return EXIT_OK
+    finally:
+        conn.close()
+
+
+def _print_corrections(conn: sqlite3.Connection) -> int:
+    parts = part_corrections(conn)
+    patterns = list_patterns(conn)
+    if parts:
+        print("per part — the specific key, and the one a board confirms:")
+        for _klm_id, mpn, correction in parts:
+            mark = _OK if correction.confirmed else _WARN
+            print(f"  {mark} {mpn:<28} {correction.rotation:>7.1f}°  {correction.source}")
+    if patterns:
+        print("\nby footprint pattern:")
+        for pattern, correction in patterns:
+            mark = _OK if correction.confirmed else _WARN
+            print(f"  {mark} {pattern:<28} {correction.rotation:>7.1f}°  {correction.source}")
+    if not parts and not patterns:
+        # ADR-0011: this is the expected state on a fresh install, and saying so
+        # beats an empty screen that reads like a bug.
+        print(f"{_INFO} no corrections recorded yet.")
+        print("    klm bundles none deliberately — the one community table is GPL-3.0 and")
+        print("    keyed by footprint, which cannot express two parts on one land pattern")
+        print("    needing different rotations. See docs/adr/0011.")
+        print("    The table fills as boards come back: klm fab feedback --confirm-rest")
     return EXIT_OK
 
 

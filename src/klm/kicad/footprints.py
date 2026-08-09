@@ -17,6 +17,7 @@ from klm.kicad.sexpr import Atom, Document, Node, SExp
 __all__ = [
     "PadInfo",
     "absolute_model_paths",
+    "endpoints",
     "footprint_name",
     "graphics_on",
     "is_absolute_model_path",
@@ -179,9 +180,17 @@ def layer_of(node: SExp) -> str:
 
 
 def graphics_on(doc: Document | SExp, layer: str) -> list[SExp]:
-    """Graphic items (`fp_line`, `fp_rect`, `fp_poly`, `fp_arc`, `fp_circle`) on a layer."""
+    """Graphic items on a layer.
+
+    Both spellings are accepted: a footprint's own graphics are `fp_*`, while
+    the board's — the edge cuts, most importantly — are `gr_*`. Checking only
+    one is how a board outline reads as missing on every real `.kicad_pcb`.
+    """
     root = doc.root if isinstance(doc, Document) else doc
-    kinds = ("fp_line", "fp_rect", "fp_poly", "fp_arc", "fp_circle")
+    kinds = (
+        "fp_line", "fp_rect", "fp_poly", "fp_arc", "fp_circle",
+        "gr_line", "gr_rect", "gr_poly", "gr_arc", "gr_circle",
+    )
     return [
         node
         for node in root.children
@@ -199,6 +208,26 @@ def segment_points(node: SExp) -> list[tuple[float, float]]:
         for xy in pts.find_all("xy"):
             points.append((_number(xy, 1), _number(xy, 2)))
     return points
+
+
+def endpoints(node: SExp) -> tuple[tuple[float, float], tuple[float, float]] | None:
+    """The two ends of a graphic item, or ``None`` if it has no distinct ends.
+
+    Not the first and last of :func:`segment_points`: that collects tags in a
+    fixed order, so an arc's last entry is its *midpoint*. Taking it as an
+    endpoint makes every rounded board corner read as an open outline.
+    """
+    start = node.find("start", recursive=False)
+    end = node.find("end", recursive=False)
+    if start is not None and end is not None:
+        return ((_number(start, 1), _number(start, 2)), (_number(end, 1), _number(end, 2)))
+
+    points = [
+        (_number(xy, 1), _number(xy, 2))
+        for pts in node.find_all("pts")
+        for xy in pts.find_all("xy")
+    ]
+    return (points[0], points[-1]) if len(points) >= 2 else None
 
 
 def _atom(item: Node | None) -> str:

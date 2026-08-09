@@ -45,7 +45,23 @@ component orientation convention that differs from KiCad's footprint convention 
 types, so a board assembles with parts rotated 90° or 180° — most visibly on polarized parts,
 where it's a scrapped board rather than a cosmetic issue.
 
-klm's model is a correction table keyed by footprint name pattern:
+**klm bundles no correction data, and the primary key is the part, not the footprint.**
+[Q3](14-open-questions.md#q3) was checked and both halves of the original plan had to change — see
+[ADR-0011](adr/0011-rotation-corrections-are-learned-not-bundled.md). In short: the one community
+table everything else copies is GPL-3.0 while klm is MIT, and it is keyed by footprint name, but
+the correct orientation is a property of how the part sits in its *reel*. Two parts on one 0603 land
+pattern can need different rotations, and a footprint-keyed table answers that confidently and
+sometimes wrongly.
+
+klm keys on the part, which it can do because it has a catalog:
+
+```sql
+-- part_rotation_correction        the specific key, and the one a board confirms
+klm_id                     rotation  offset_x  offset_y  source     confirmed_at
+'01JB4K7QW8ZR3XN5M2VYT9D'    180.0       0.0       0.0  learned    2026-08-09
+```
+
+The footprint-pattern table remains as the generalisation, for the packages you use repeatedly:
 
 ```sql
 -- rotation_correction
@@ -59,17 +75,28 @@ pattern                  rotation  offset_x  offset_y  source     confirmed_at
 
 Resolution order, most specific first:
 
-1. Per-part override (a `KLM_FAB_ROTATION` field on the part).
-2. User table entry (`source = 'user'` or `'learned'`).
-3. Bundled table entry (`source = 'bundled'`).
-4. No correction.
+1. A per-part correction in `part_rotation_correction`.
+2. A `KLM_FAB_ROTATION` field on the part — a manual override that travels with the design.
+3. A `user` or `learned` pattern entry.
+4. A `bundled` pattern entry. **klm ships none**; a user who has validated a table of their own can
+   load one and have it rank below their learned values.
+5. No correction.
+
+Ties between patterns are broken by length, so `^SOIC-8_3.9x4.9mm` beats `^SOIC-8`.
+
+One systematic difference is *not* in the table: KiCad mirrors bottom-side components and JLCPCB
+does not. That is a whole-layer transform and lives in the fab profile
+(`mirror_bottom_rotation`), because putting it in a per-package table would mean repeating it in
+every row.
 
 Corrections are applied as `final_rotation = (kicad_rotation + correction) mod 360`, with offsets
 applied in the footprint's rotated frame.
 
-⚠️ The exact per-package correction values are empirical community knowledge, not a published
-specification, and they change. The bundled table is a **starting point that must be validated**,
-not an authority. See [14 — Open questions](14-open-questions.md#q3).
+⚠️ **The cost of shipping nothing, stated plainly:** the first board of any package klm has not
+seen is unprotected, where a bundled table would have been right most of the time. `klm fab`
+reports which references carry no confirmed correction, and the package README repeats it, so the
+fab's DFM preview gets a careful look. There is no stronger mitigation, and this is the
+[ADR-0011](adr/0011-rotation-corrections-are-learned-not-bundled.md) trade-off in one sentence.
 
 ### Learning from real runs
 
@@ -84,9 +111,19 @@ After a board comes back, record which references were placed wrong and by how m
 
 1. Maps each reference to its footprint.
 2. Derives the correction that would have made it right.
-3. Writes or updates a `learned` rotation-correction row, generalized to the footprint pattern.
-4. Marks every *other* reference's footprint as `confirmed` — which is the more valuable half,
-   because it converts "untested" into "verified against a physical board".
+3. Writes or updates a `learned` correction **for that part**. Corrections accumulate: a part
+   already corrected 90° that still came back 180° out needs 270°, and making the user do that
+   arithmetic is how the second correction gets entered wrong.
+4. Marks every *other* reference `confirmed` — the more valuable half, because it converts
+   "untested" into "verified against a physical board", including for the parts that needed no
+   correction at all. That is most of the board, and it is knowledge nothing else records.
+
+Generalising one observation to a footprint pattern is offered as `--generalize`, not done
+automatically: one board is one data point about one reel.
+
+The mapping from reference to part comes from the package's own `manifest.json`, which records a
+`klm_id` for every placement. By the time a board comes back the schematic may have moved on, so
+re-reading it would be answering a question about a different design.
 
 The next board with a SOT-23-6 is right the first time. Over a handful of runs, the table becomes
 genuinely trustworthy for the packages you actually use — which is a much smaller set than the
@@ -102,6 +139,9 @@ JLCPCB's assembly BOM groups by part and needs LCSC part numbers.
 | `Designator` | comma-separated references |
 | `Footprint` | footprint name |
 | `LCSC Part #` | the `LCSC` field |
+
+Rows are written through a real CSV writer rather than by joining strings, because a value like
+`1%, 100ppm` would otherwise shift every column after it and the file would still look fine.
 
 Preflight checks specific to assembly:
 
@@ -168,14 +208,38 @@ The package is not written unless these pass:
 
 `klm fab --check` runs preflight alone, which is what you want in CI on every push.
 
+Two notes on how these are implemented. "Every non-DNP part resolves to a catalog part" and the
+lint gate are scoped to **the parts this board uses** — an unrelated draft elsewhere in the catalog
+missing a datasheet is not a reason to refuse to fabricate this board. And the stock check reads
+*stored* offers rather than calling a supplier, for the same reason `klm lint` never touches the
+network: a check whose result depends on whether TME is up fails randomly. It says so, and names
+`klm refresh`.
+
+The board-outline check is the one that earns its place: an open outline plots, uploads, and passes
+the fab's own intake — the question arrives after the order is placed.
+
 ## 8. Commands
 
 ```bash
+klm bom [--project .] [--variant basic] [--format csv|json]
+
 klm fab                              # full package for the current project
 klm fab --variant basic
-klm fab --check                      # preflight only
+klm fab --check                      # preflight only, writes nothing — for CI
 klm fab --no-assembly                # bare boards: gerbers + drill only
-klm fab feedback <dir> --wrong U3:180 --confirm-rest
+klm fab --profile generic            # KiCad's own conventions, uncorrected
+klm fab --no-timestamp               # byte-reproducible manifest
+klm fab feedback <dir> --wrong U3:180 --confirm-rest [--generalize]
 klm fab corrections list             # inspect the correction table
 klm fab corrections set '^QFN-24' 270 --source user
+klm fab corrections remove '^QFN-24'
 ```
+
+`klm bom` deliberately needs **no KiCad and no catalog**. It reads the `.kicad_sch` files directly,
+so CI can check a BOM, the clean-room verifier can use it, and a cost estimate does not depend on
+whether the person asking has `kicad-cli` on their PATH. Everything else in the pipeline does shell
+out, because gerbers genuinely require KiCad's own plotting code.
+
+Without a catalog the BOM still comes out, just without MPNs. A symbol is tied to a part by
+`KLM_ID` and nothing else — name matching is not attempted, because a BOM that quietly attributes a
+line to the wrong part produces a wrong order and nothing downstream catches it.

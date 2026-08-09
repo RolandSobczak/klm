@@ -66,20 +66,37 @@ than deferred, because nothing in klm now depends on an endpoint that can disapp
 
 ---
 
-## Q3 — JLCPCB rotation correction data
+## Q3 — JLCPCB rotation correction data — **RESOLVED** (2026-08-09)
 
-**Blocks:** Phase 5
+**Blocked:** Phase 5 · **Answer:** worse than assumed, and it moved the key rather than the data.
 
-The correction values are empirical community knowledge, not a published specification. They vary
-by footprint library, change over time, and disagree between sources.
+The old text guessed that the values "vary by footprint library, change over time, and disagree
+between sources". Two of those three turned out to be wrong in an instructive way.
 
-**To verify:** the current state of community correction databases, their licensing, and whether
-JLCPCB has published anything authoritative.
+- **JLCPCB publishes nothing authoritative.** Their own KiCad guide gives no per-package values; it
+  tells the reader to install a third-party plugin and tick a box.
+- **The sources do not disagree, because there is one source.** `Bouni/kicad-jlcpcb-tools` says
+  outright that it adopted its corrections from `matthewlai/JLCKicadTools`; KiBot cites the same
+  project. That original is **GPL-3.0**, and klm is MIT.
+- **The index is wrong, not just the values.** KiBot's notes state it plainly: *"you can have two
+  components with the same footprint and different rotations in the same project."* The correct
+  orientation is a property of how the part sits in its reel — chosen per manufacturer part number
+  — and the land pattern only correlates with it. A footprint-keyed table cannot represent the
+  disagreement, so it answers confidently and sometimes wrongly.
+- Separately: KiCad mirrors bottom-side components and JLCPCB does not. That is a whole-layer
+  transform belonging in the fab profile, not a per-package correction.
 
-**If wrong:** low impact by design. The bundled table is explicitly a *starting point*, and
-`klm fab feedback` ([09 §3](09-manufacturing-outputs.md#learning-from-real-runs)) makes the system
-converge on correct values for the packages actually used. If no usable bundled data exists, klm
-ships with an empty table and learns from run one — slower, but the architecture is unchanged.
+The route the community is moving toward — deriving rotation from EasyEDA's fully-qualified
+footprint name — is closed to klm by [ADR-0009](adr/0009-lcsc-manual-first.md), independently.
+
+**Decision:** [ADR-0011](adr/0011-rotation-corrections-are-learned-not-bundled.md). klm bundles no
+rotation data, and records corrections **per part** first, per footprint pattern second — which it
+can do and the community tools cannot, because it has a catalog. The fallback this entry named
+("ships with an empty table and learns from run one") is what happened.
+
+**The cost, stated:** the first board of any new package is unprotected, where a bundled table
+would have been right most of the time. `klm fab` reports which references carry no confirmed
+correction so the fab's DFM preview gets a careful look; there is no stronger mitigation.
 
 ---
 

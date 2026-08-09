@@ -209,9 +209,29 @@ ALTER TABLE offer ADD COLUMN datasheet_url TEXT;
 """
 
 
+# A pick-and-place rotation is a property of how the part sits in its reel,
+# which the manufacturer chooses per part number — not a property of the land
+# pattern. Two parts on one 0603 footprint can need different rotations, and a
+# footprint-keyed table answers that confidently and sometimes wrongly. klm can
+# key on the part because it has one; the community tools have only a footprint
+# name, which is why theirs are keyed the way they are (docs/adr/0011).
+_PART_ROTATION = """
+CREATE TABLE part_rotation_correction (
+    klm_id       TEXT PRIMARY KEY REFERENCES part(klm_id) ON DELETE CASCADE,
+    rotation     REAL NOT NULL DEFAULT 0,
+    offset_x     REAL NOT NULL DEFAULT 0,
+    offset_y     REAL NOT NULL DEFAULT 0,
+    source       TEXT NOT NULL CHECK (source IN ('user', 'learned')),
+    confirmed_at TEXT,          -- when a physical board demonstrated it
+    note         TEXT
+);
+"""
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "initial schema", _INITIAL),
     Migration(2, "offer provenance columns", _OFFER_PROVENANCE),
+    Migration(3, "per-part rotation corrections", _PART_ROTATION),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1].version

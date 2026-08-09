@@ -19,7 +19,7 @@ SYMBOL_ASSET = """(kicad_symbol_lib
 	(generator "test")
 	(symbol "SRC"
 		(property "Reference" "R" (at 0 0 0))
-		(property "Value" "SRC" (at 0 0 0))
+		(property "Value" "4.7k" (at 0 0 0))
 		(symbol "SRC_1_1"
 			(pin passive line (at -2.54 0 0) (length 1.27) (name "~") (number "1"))
 			(pin passive line (at 2.54 0 0) (length 1.27) (name "~") (number "2"))

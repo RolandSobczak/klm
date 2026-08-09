@@ -63,11 +63,12 @@ klm sync resolve [--strategy prefer-global|prefer-project]
 klm sync adopt [--name N] [--dry-run]
 klm promote <symbol|mpn|klm_id> [--category PATH]
 
-BUILD & FAB
-klm bom --project . [--variant v] [--format csv|json]
-klm fab [--variant v] [--check] [--no-assembly] [--normalize-timestamps]
-klm fab feedback <dir> --wrong U3:180 --confirm-rest
-klm fab corrections list|set
+BUILD & FAB                                         every command takes --project DIR
+klm bom [--variant v] [--format text|csv|json]      no KiCad, no catalog needed
+klm fab [--variant v] [--profile jlcpcb|generic] [--output DIR]
+        [--check] [--no-assembly] [--allow-dirty] [--no-timestamp]
+klm fab feedback <dir> --wrong U3:180 [--confirm-rest] [--generalize]
+klm fab corrections list | set <pattern> <deg> [--source user] | remove <pattern>
 
 REPOSITORY & CI                                     see doc 15
 klm scaffold [--preset publish|private] [--check] [--update]

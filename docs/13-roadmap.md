@@ -121,13 +121,28 @@ all of which arrive in phases 0–3.*
 
 - BOM extraction with variants and DNP
 - `kicad-cli` wrappers for gerbers, drill, position, DRC, ERC
-- Rotation correction table, bundled starting data, application at export
+- Rotation correction table, ~~bundled starting data~~, application at export
 - JLCPCB fab profile; assembly BOM and CPL
 - Preflight
 - `klm fab feedback` — the learning loop
 
 **Done when:** a board is fabricated and assembled from a `klm fab` package with no manual edits,
 and a rotation error recorded once never recurs.
+
+**Bundled rotation data was dropped.** [Q3](14-open-questions.md#q3) found that the one community
+table everything else copies is GPL-3.0 (klm is MIT) and is keyed by footprint name, while the
+correct orientation is a property of the part's reel — two parts on one land pattern can disagree.
+klm records corrections **per part**, which it can do because it has a catalog, and ships none. See
+[ADR-0011](adr/0011-rotation-corrections-are-learned-not-bundled.md); the cost is that the first
+board of a new package is unprotected, and `klm fab` says so rather than pretending otherwise.
+
+The done-criterion's second half is therefore the one that matters here, and it is the half the
+learning loop delivers.
+
+**Verified so far:** the pipeline, preflight, profiles and feedback loop are tested against an
+injected `kicad-cli`, and `klm bom` is verified against real boards. What is *not* verified is
+`kicad-cli` itself — its exact flags and output — because KiCad is not installed on the development
+machine. That is the standing gap for this phase.
 
 *Solves [P5](01-vision-and-problems.md#p5--fabrication-output-needs-hand-fixing).*
 
