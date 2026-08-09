@@ -1166,3 +1166,29 @@ def test_research_tools_without_credentials_offers_no_supplier(home: Path, capsy
     out = capsys.readouterr().out
     assert "supplier_search" not in out
     assert "tme: no credentials" in out
+
+
+def test_research_run_needs_the_agent_extra(home: Path, tmp_path: Path, capsys) -> None:
+    """No SDK is a thing to report, not a traceback."""
+    assert main(["init"]) == EXIT_OK
+    path = tmp_path / "req.toml"
+    path.write_text(REQUIREMENT, encoding="utf-8")
+
+    assert main(["research", "run", str(path)]) == EXIT_CHECK_FAILED
+
+    out = capsys.readouterr().out
+    assert "klm[agent]" in out
+
+
+def test_research_run_checks_the_requirement_before_spending_anything(
+    home: Path, tmp_path: Path, capsys
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    path = tmp_path / "req.toml"
+    path.write_text('[constrains]\nvin = ">=5V"\n', encoding="utf-8")
+
+    assert main(["research", "run", str(path)]) == EXIT_CHECK_FAILED
+
+    out = capsys.readouterr().out
+    assert "unknown section 'constrains'" in out
+    assert "klm[agent]" not in out, "the file is read before a model is built"

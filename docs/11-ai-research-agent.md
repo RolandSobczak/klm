@@ -202,38 +202,33 @@ expected, not a regression.
 
 ## 4. Implementation
 
-Python core, the Anthropic SDK, and the SDK's tool runner rather than a hand-written loop.
+Python core and the Anthropic SDK, behind one seam: `klm.llm.client.ModelClient` — a system
+prompt, a conversation, a tool list, one reply back. `klm.research.agent` drives the loop against
+that protocol.
 
 ```python
-import anthropic
-from anthropic import beta_tool
-
-client = anthropic.Anthropic()
-
-@beta_tool
-def catalog_search(query: str, category: str | None = None) -> str:
-    """Search the local klm catalog for existing approved parts.
-
-    Args:
-        query: free-text or parametric query
-        category: optional category path filter, e.g. 'IC/Power/Regulator'
-    """
-    return json.dumps(services.catalog.search(query, category=category))
-
-runner = client.beta.messages.tool_runner(
-    model="claude-opus-5",
-    max_tokens=16000,
-    thinking={"type": "adaptive"},
-    output_config={"effort": "high"},
-    system=RESEARCH_SYSTEM_PROMPT,
-    tools=[catalog_search, supplier_search, datasheet_fetch,
-           datasheet_extract, footprint_lookup, propose_part],
-    messages=[{"role": "user", "content": requirement.to_prompt()}],
+transcript = research(
+    requirement,                       # klm.research.requirement.Requirement
+    toolset,                           # klm.research.tools.Toolset — what this machine has
+    AnthropicClient(effort="high"),
+    limits=Limits(max_iterations=20, max_tokens=400_000, max_spend=2.00),
+    conn=writable,                     # the event log — klm's connection, not the agent's
+    on_text=print,                     # stream the answer as it arrives
 )
-
-for message in runner:
-    ui.stream(message)
 ```
+
+**klm owns the loop rather than using the SDK's tool runner**, which is the documented default.
+Three reasons, in order of weight:
+
+- **The guardrails are the point of this phase.** An iteration cap, a token budget, a spend
+  ceiling and an audit trail are each a line of code with a test beside it here, rather than a
+  hook wired into someone else's loop.
+- **klm's tools are data, not decorated functions.** The tool set is built at runtime from what
+  the machine actually has — no TME credentials means no `supplier_search` — and the decorator-
+  based runner wants module-level functions with type annotations.
+- **It is testable without an API key or the SDK.** Every guardrail is exercised against a fake
+  model that costs nothing. A guardrail that can only be tested by spending money is a guardrail
+  nobody tests.
 
 Model and parameter choices:
 
@@ -242,14 +237,29 @@ Model and parameter choices:
   three weeks of shipping.
 - **`claude-haiku-4-5`** for bulk mechanical extraction (parsing a parametric table out of 40
   supplier rows), where the task is narrow and volume matters.
-- **Adaptive thinking** with `effort: "high"`. Research genuinely benefits from deliberation;
-  routine refreshes drop to `medium`.
-- **Streaming**, so the user watches searches happen instead of staring at a spinner for a minute.
+- **Adaptive thinking** at `effort: "high"`. Thinking is on by default on this model, and a fixed
+  thinking budget is not a thing it accepts — depth is `effort`, and routine work drops to
+  `medium`.
+- **Streaming**, so the user watches searches happen instead of staring at a spinner — and because
+  a research turn is long enough for a non-streaming request to hit an HTTP timeout.
 - **Structured outputs** (`output_config.format`) for the final proposal, so it validates against
-  klm's schema rather than being parsed out of prose.
+  klm's schema rather than being parsed out of prose. That arrives with the proposal queue.
 
 Costs are metered per research session and shown in the UI. An API key is required for agent
-features only; klm's entire non-agent surface works without one.
+features only; klm's entire non-agent surface works without one, and the SDK is an extra
+(`pip install 'klm[agent]'`) rather than a dependency.
+
+Two rules the loop enforces, both because the failure they prevent looks like success:
+
+- **A session that stopped early says so.** Hitting the iteration cap or the spend ceiling ends
+  the run with a *partial* answer, reported as partial and exiting non-zero. An answer that was
+  cut off and reads as finished is the worst possible output here.
+- **A tool never fails the session.** A supplier outage or an unknown category comes back to the
+  model as a result it can act on, so the loop has nothing to catch and the session redirects
+  instead of ending.
+
+`stop_reason` is checked before the reply is read. A refusal carries no usable content, and the
+difference between a clear message and an `IndexError` is that check.
 
 ## 5. Guardrails
 
@@ -260,8 +270,13 @@ features only; klm's entire non-agent surface works without one.
 | **Conflicts surfaced, not resolved** | When a datasheet and a supplier field disagree, both are recorded and the candidate is flagged for review |
 | **Stock and lifecycle verified** | Claims about availability come from a live offer, never from the model's recollection |
 | **No invented part numbers** | Every proposed MPN must be traceable to a supplier search result. Unbacked MPNs are dropped before review |
-| **Bounded** | Iteration cap, token budget per session, and a spend ceiling |
+| **Bounded** | Iteration cap, token budget per session, and a spend ceiling — all three checked *before* each request, because a limit that trips only once exceeded is a limit that is always exceeded |
 | **Logged** | Every session's tool calls and results go to `event_log`, so a bad part can be traced to the reasoning that produced it |
+
+The last two are `klm.research.agent.Limits` and `klm.services.events`. Note which connection
+writes that log: the agent's tools hold a **read-only** one, and klm records the session on its
+own. klm writes about the agent; the agent cannot write anything. That split is what lets the
+audit trail and the no-write guarantee coexist.
 
 The invented-part-number rule deserves emphasis: a plausible-looking MPN that doesn't exist is the
 most likely and most costly hallucination in this domain, and it's cheap to eliminate by requiring

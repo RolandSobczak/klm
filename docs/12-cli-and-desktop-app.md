@@ -94,7 +94,7 @@ klm labels print [--order …|--location …|--klm-id …]
 AGENT
 ✓ klm research check <FILE> [--toml]   Read a requirement; no catalog, no API key
 ✓ klm research tools [--format json]   What the agent could do on this machine
-○ klm research run --spec req.toml [--interactive]
+✓ klm research run <FILE> [--max-spend USD] [--effort …] [--quiet]
 ○ klm research review                  Work the proposal queue
 ○ klm ask <klm_id> "<question>"        Datasheet Q&A
 

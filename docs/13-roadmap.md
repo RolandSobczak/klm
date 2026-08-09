@@ -264,10 +264,13 @@ the agent:
   research tools`. Arguments are validated before a service sees them; the connection is
   read-only. `datasheet_*` and `propose_part` arrive with the datasheet cache and the review
   queue below.
-- Research agent on the Anthropic tool runner
+- **Research agent** *(done)* — `klm.llm.client` (the model seam), `klm.research.agent`
+  (the loop, its limits and its transcript) and `klm research run`. klm drives the loop
+  rather than the SDK's tool runner, so every guardrail is tested against a fake model.
 - Datasheet fetch, cache, and cited parameter extraction
 - Proposal queue and review UI
-- Guardrails, logging, cost metering
+- **Guardrails, logging, cost metering** *(done with the loop)* — they are the loop's
+  structure rather than a layer on top of it: `Limits`, `Pricing`, and `event_log`.
 - Datasheet Q&A; substitute finding
 
 **Done when:** a stated requirement yields three cited, in-stock candidates, and approving one

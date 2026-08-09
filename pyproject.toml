@@ -31,6 +31,12 @@ app = [
     "uvicorn>=0.29",
     "pywebview>=5.0",
 ]
+# The research agent. Separate from `app` because the two are independent: a
+# machine can run the desktop app with no API key, and a headless one can run
+# the agent with no webview. Neither is needed to manage a catalog.
+agent = [
+    "anthropic>=0.60",
+]
 dev = [
     "pytest>=8.0",
     "hypothesis>=6.100",

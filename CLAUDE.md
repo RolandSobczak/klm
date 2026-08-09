@@ -18,8 +18,9 @@ still open, but no longer blocks anything shipped.** **Q8 is resolved too.** Pha
 app) is complete: the API, the job model, eight screens, an SVG renderer for symbols and
 footprints, and the sync diff. **Phase 9 is under way**: the TME v2 migration and constraint→ID
 resolution are done, and so is the requirement schema (`klm.research.requirement`, `klm research
-check`) and the first four agent tools (`klm.research.tools`, `klm research tools`). Next: the
-agent itself on the Anthropic tool runner, the datasheet cache, and the proposal queue.
+check`), the first four agent tools (`klm.research.tools`, `klm research tools`), and the research
+loop itself (`klm.llm.client`, `klm.research.agent`, `klm research run`). Next: the datasheet cache
+and cited extraction, then the proposal queue and review UI.
 
 - `README.md` — entry point and documentation map
 - `docs/01`–`docs/15` — the design, one concern per document
@@ -126,6 +127,20 @@ These are the things that will bite an implementer who hasn't read the docs.
 - **Preference scores are relative to the candidate set**, and a preference a candidate is silent
   about is dropped from its average rather than scored zero — scoring it zero punishes a part for
   a field klm never fetched. Ranking a single candidate is meaningless by construction.
+- **klm drives the agent loop; the SDK's tool runner is deliberately not used.** The guardrails
+  (iteration cap, token budget, spend ceiling, `event_log`) *are* this phase, the tool set is data
+  built per machine rather than decorated functions, and the loop has to be testable against a fake
+  model — a guardrail only exercisable by spending money is one nobody exercises. `klm.llm.client`
+  is the seam; `research/agent.py` is the loop.
+- **A session that stopped early says so, and exits non-zero.** An answer cut off by the iteration
+  cap or the spend ceiling that reads as finished is the worst output the agent can produce.
+- **Limits are checked before each request, not after.** A limit that trips only once exceeded is
+  a limit that is always exceeded.
+- **The event log is written on klm's connection, not the agent's.** The tools hold a read-only
+  one. klm records what the agent did; the agent cannot record anything — that split is what lets
+  the audit trail and the no-write guarantee coexist.
+- **`stop_reason` is checked before the reply is read.** A refusal carries no usable content; the
+  check is the difference between a clear message and an `IndexError`.
 - **The AI agent has no tool that writes to the catalog.** Architectural, not a prompt
   instruction. It proposes into a review queue; a human approves; the result is still only a
   `draft` that must pass asset QA and lint. See `docs/adr/0006`. Enforced twice: no such function

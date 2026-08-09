@@ -420,6 +420,15 @@ def _add_research_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParse
     tools.add_argument("--format", choices=("text", "json"), default="text")
     tools.set_defaults(func=cmd_research_tools)
 
+    run = actions.add_parser("run", help="Research a requirement. Costs money; proposes only.")
+    run.add_argument("file", metavar="FILE", help="A requirement file (klm research check).")
+    run.add_argument("--max-spend", type=float, default=2.0, metavar="USD")
+    run.add_argument("--max-iterations", type=int, default=20)
+    run.add_argument("--max-tokens", type=int, default=400_000, help="Across the whole session.")
+    run.add_argument("--effort", choices=("low", "medium", "high", "xhigh", "max"), default="high")
+    run.add_argument("--quiet", action="store_true", help="Don't stream the answer as it arrives.")
+    run.set_defaults(func=cmd_research_run)
+
 
 def _add_repo_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     verify = sub.add_parser("verify", help="Prove a project opens for somebody else.")
@@ -2995,6 +3004,83 @@ def cmd_research_tools(args: argparse.Namespace) -> int:
         print(f"{_INFO} no tool writes to the catalog; proposals go to a review queue")
     finally:
         conn.close()
+    return EXIT_OK
+
+
+def cmd_research_run(args: argparse.Namespace) -> int:
+    """Research one requirement, and say what it cost.
+
+    Two connections, deliberately: the tools get a read-only one, and the
+    event log gets a writable one. klm records what the agent did; the agent
+    cannot record anything (docs/adr/0006).
+    """
+    from klm.llm.client import AnthropicClient, LlmUnavailable
+    from klm.research.agent import Limits, Step, research
+    from klm.research.requirement import RequirementError, load_requirement
+    from klm.research.tools import ResearchContext, build_toolset
+
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+
+    try:
+        requirement = load_requirement(Path(args.file))
+    except RequirementError as exc:
+        for problem in exc.problems:
+            print(f"{_FAIL} {problem}")
+        return EXIT_CHECK_FAILED
+
+    config = load_config(paths.config)
+    adapters = {
+        name: adapter
+        for name, adapter in build_adapters(config, paths.supplier_cache).items()
+        if config.suppliers[name].mode == "api" and config.suppliers[name].has_credentials()
+    }
+
+    try:
+        client = AnthropicClient(effort=args.effort)
+    except LlmUnavailable as exc:
+        print(f"{_FAIL} {exc}")
+        return EXIT_CHECK_FAILED
+
+    reading = connect(paths.db, create=False, read_only=True)
+    writing = connect(paths.db, create=False)
+    try:
+        toolset = build_toolset(
+            ResearchContext(conn=reading, store=AssetStore(paths.assets), adapters=adapters)
+        )
+        print(f"{_INFO} {requirement.kind}: {len(toolset.tools)} tool(s), "
+              f"ceiling ${args.max_spend:.2f}")
+
+        def show(step: Step) -> None:
+            detail = ", ".join(f"{k}={v!r}" for k, v in step.arguments.items())
+            print(f"  {step.name}({detail})")
+
+        transcript = research(
+            requirement,
+            toolset,
+            client,
+            limits=Limits(
+                max_iterations=args.max_iterations,
+                max_tokens=args.max_tokens,
+                max_spend=args.max_spend,
+            ),
+            conn=writing,
+            on_text=None if args.quiet else lambda text: print(text, end="", flush=True),
+            on_step=show,
+        )
+    finally:
+        reading.close()
+        writing.close()
+
+    print()
+    if args.quiet and transcript.answer:
+        print(transcript.answer)
+    for line in transcript.summary():
+        print(f"{_INFO} {line}")
+    if not transcript.complete:
+        print(f"{_WARN} this answer is partial — {transcript.stopped}")
+        return EXIT_CHECK_FAILED
+    print(f"{_INFO} nothing was written to the catalog; this is a proposal")
     return EXIT_OK
 
 
