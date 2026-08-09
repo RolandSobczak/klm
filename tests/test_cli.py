@@ -1294,3 +1294,25 @@ def test_approving_makes_a_draft(home: Path, kicad_libs: None, capsys) -> None:
     assert "draft" in out
     assert main(["research", "review"]) == EXIT_OK
     assert "nothing waiting" in capsys.readouterr().out
+
+
+def test_substitutes_reports_when_nothing_matches(home: Path, capsys) -> None:
+    assert main(["init"]) == EXIT_OK
+    paths = Paths.resolve(None)
+    conn = connect(paths.db, create=False)
+    try:
+        seed_resistor(AssetStore(paths.assets), conn)
+    finally:
+        conn.close()
+
+    code = main(["substitutes", "RC0402FR-074K7L"])
+
+    assert code == EXIT_CHECK_FAILED
+    assert "nothing in the catalog shares" in capsys.readouterr().out
+
+
+def test_ask_needs_the_agent_extra(home: Path, capsys) -> None:
+    assert main(["init"]) == EXIT_OK
+    code = main(["ask", "https://example.test/a.pdf", "What is Vin?"])
+    assert code == EXIT_CHECK_FAILED
+    assert "klm[agent]" in capsys.readouterr().out

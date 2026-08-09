@@ -98,7 +98,8 @@ AGENT
 ✓ klm research review [ID] [--all] [--approve ID] [--reject ID --reason TEXT]
 ✓ klm datasheet fetch <URL_OR_PART> [--refresh]
 ✓ klm datasheet extract <URL_OR_PART> --parameter NAME …  page + quote, or dropped
-○ klm ask <klm_id> "<question>"        Datasheet Q&A
+✓ klm ask <URL_OR_PART> "<question>"   Datasheet Q&A, with what it quoted
+✓ klm substitutes <ID_OR_MPN> [--all]  Mechanically pin-compatible catalog parts
 
 COST
 klm order plan --build "5xsensor-board:full,2xpsu-board" [--projects DIR] [--explain] [--save]

@@ -337,10 +337,20 @@ schema and the system prompt — the failures tell you what the interface is mis
 
 Beyond part research, the same infrastructure supports:
 
-- **Datasheet Q&A**: "what's the maximum junction temperature?" against a cached PDF.
-- **Substitute finding**: a stocked part goes to zero; find pin-compatible alternatives. Pin
-  compatibility is checked mechanically against the catalog's own footprint and pin data, with
-  the model handling only the search and the electrical-equivalence argument.
+- **Datasheet Q&A** (`klm ask`): "what's the maximum junction temperature?" against a cached
+  PDF. Looser than `datasheet_extract` on purpose — a question has a prose answer, and demanding
+  a citation per sentence would make the useful answers unavailable. What klm does instead is
+  report whether the answer quoted the document *at all*, so an ungrounded one is visibly
+  ungrounded rather than indistinguishable.
+- **Substitute finding** (`klm substitutes`): a stocked part goes to zero; find pin-compatible
+  alternatives. Pin compatibility is checked mechanically against the catalog's own footprint and
+  pin data — same land pattern (pad geometry, quantised), same pin numbers, same electrical
+  types, **same pin names** — with the model handling only the search and the
+  electrical-equivalence argument. Names matter: two parts can share a footprint and a pin-type
+  map while pin 3 is `EN` on one and `GND` on the other, both inputs, and one of them destroys
+  the board. Three answers — `compatible`, `differs` (with exactly what differs, so a human can
+  overrule it), and `unchecked` when an asset is missing. A `compatible` that meant "I could not
+  look" is how the wrong part reaches a board.
 - **Categorization and description cleanup**: proposing consistent descriptions across a catalog
   imported from a messy library. Bulk, mechanical, cheap model.
 - **Design review**: given a schematic's BOM, flag parts running near a rating, missing decoupling,
