@@ -16,7 +16,9 @@ correction table and `klm fab feedback`), and repository scaffolding and CI (`kl
 inventory (`klm order plan|export|mark-placed|receive|pin`, `klm stock *`, `klm labels *`). **Q1, Q2, Q3, Q10 and Q11 are resolved; Q4 was checked and is
 still open, but no longer blocks anything shipped.** **Q8 is resolved too.** Phase 8 (the desktop
 app) is complete: the API, the job model, eight screens, an SVG renderer for symbols and
-footprints, and the sync diff. Phase 9 (the AI research agent) is next.
+footprints, and the sync diff. **Phase 9 is under way**: the TME v2 migration and constraint→ID
+resolution are done, and so is the requirement schema (`klm.research.requirement`, `klm research
+check`). Next: tool definitions, then the agent itself.
 
 - `README.md` — entry point and documentation map
 - `docs/01`–`docs/15` — the design, one concern per document
@@ -108,6 +110,21 @@ These are the things that will bite an implementer who hasn't read the docs.
   fifty 0402 resistors from creating fifty footprints.
 - **`cad/scripts/obj2step.py` is not on klm's import path on purpose.** It runs under FreeCAD's
   interpreter; putting it under `src/klm` would invite someone to import it.
+- **A requirement's hard constraints and its preferences are different types**, not two lists with
+  a convention. A preference can only reorder what already qualified, so a near miss is reported
+  rather than dropped — which is what makes "nothing meets your constraints; the closest is X"
+  possible. `prefer` inside a `[constraints]` entry is refused, not accommodated.
+- **A constraint checked against a value the candidate never stated is `unknown`, never `pass`** —
+  the QA gate's rule, in the research layer. A value klm cannot read is also `unknown`, not
+  `fail`: "see datasheet" in a supplier column must not reject the right part.
+- **Ranges are compared by coverage, not overlap.** A part rated 1.8–6.5 V does not run a
+  4.5–18 V rail, and the two overlap. `NumericConstraint._covered_by` is where this lives.
+- **In a requirement, a bare string is a text constraint** unless it carries a comparison operator
+  or a range. Deciding by "does it happen to parse as a number" would read `package = "0402"` as
+  402 and filter an axis nobody asked about.
+- **Preference scores are relative to the candidate set**, and a preference a candidate is silent
+  about is dropped from its average rather than scored zero — scoring it zero punishes a part for
+  a field klm never fetched. Ranking a single candidate is meaningless by construction.
 - **The AI agent has no tool that writes to the catalog.** Architectural, not a prompt
   instruction. It proposes into a review queue; a human approves; the result is still only a
   `draft` that must pass asset QA and lint. See `docs/adr/0006`.

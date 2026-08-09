@@ -297,6 +297,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_fab_parsers(sub)
     _add_repo_parsers(sub)
     _add_ordering_parsers(sub)
+    _add_research_parsers(sub)
 
     app = sub.add_parser("app", help="Open klm in a desktop window.")
     app.add_argument("--port", type=int, help="Localhost port (default: a free one).")
@@ -398,6 +399,20 @@ def _add_ordering_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParse
     scanning = label_actions.add_parser("scan", help="Resolve a short ID from a drawer.")
     scanning.add_argument("short")
     scanning.set_defaults(func=cmd_labels_scan)
+
+
+def _add_research_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    research = sub.add_parser("research", help="Find a part that meets a stated requirement.")
+    actions = research.add_subparsers(dest="action", metavar="ACTION", required=True)
+
+    check = actions.add_parser("check", help="Read a requirement file and say what it means.")
+    check.add_argument("file", metavar="FILE")
+    check.add_argument(
+        "--toml",
+        action="store_true",
+        help="Print the requirement back, normalised — what klm actually understood.",
+    )
+    check.set_defaults(func=cmd_research_check)
 
 
 def _add_repo_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -2890,6 +2905,38 @@ def cmd_labels_scan(args: argparse.Namespace) -> int:
     finally:
         conn.close()
     return EXIT_OK if len(matches) == 1 else EXIT_CHECK_FAILED
+
+
+# ---------------------------------------------------------------------------
+# research
+# ---------------------------------------------------------------------------
+
+
+def cmd_research_check(args: argparse.Namespace) -> int:
+    """Read a requirement and say back what klm understood by it.
+
+    Needs no catalog and no API key. The point is to make the hard/soft split
+    visible before a research session spends money on it: a constraint that
+    silently became a preference, or a section a typo dropped, is far cheaper
+    to see here than in a list of candidates that all look plausible.
+    """
+    from klm.research.requirement import RequirementError, load_requirement
+
+    try:
+        requirement = load_requirement(Path(args.file))
+    except RequirementError as exc:
+        for problem in exc.problems:
+            print(f"{_FAIL} {problem}")
+        return EXIT_CHECK_FAILED
+
+    if args.toml:
+        print(requirement.to_toml(), end="")
+        return EXIT_OK
+
+    print(f"{_OK} {args.file} reads as a requirement")
+    print()
+    print(requirement.to_prompt())
+    return EXIT_OK
 
 
 # ---------------------------------------------------------------------------

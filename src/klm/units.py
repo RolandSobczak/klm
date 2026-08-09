@@ -21,6 +21,7 @@ import re
 from dataclasses import dataclass
 
 __all__ = [
+    "DEGREE_CELSIUS",
     "OHM",
     "Quantity",
     "UnitError",
@@ -39,6 +40,10 @@ __all__ = [
 OHM = "Ω"
 
 MICRO = "µ"
+
+#: U+00B0 DEGREE SIGN + C. Operating ranges are stated in it everywhere, and a
+#: requirement that cannot say `-40..85°C` cannot state a real part.
+DEGREE_CELSIUS = "°C"
 
 
 class ValueParseError(ValueError):
@@ -99,6 +104,15 @@ _UNIT_ALIASES = {
     "w": "W",
     "hz": "Hz",
     "s": "s",
+    # Temperature, for operating ranges. Bare `C` is deliberately absent: it is
+    # also the coulomb, and the two would be told apart by nothing. `°C` and
+    # `degC` say which one is meant. An SI prefix on a temperature is
+    # meaningless (`1 m°C`), but it is also unreachable — nothing states a
+    # rating that way — so the parser is not special-cased for it.
+    "°c": DEGREE_CELSIUS,
+    DEGREE_CELSIUS: DEGREE_CELSIUS,
+    "degc": DEGREE_CELSIUS,
+    "celsius": DEGREE_CELSIUS,
 }
 
 _UNIT_SUFFIXES = tuple(sorted(_UNIT_ALIASES, key=len, reverse=True))

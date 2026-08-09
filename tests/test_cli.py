@@ -1087,3 +1087,56 @@ def test_output_survives_a_windows_code_page(
     assert code in (EXIT_OK, EXIT_CHECK_FAILED), "a code page must not become an error"
     assert "catalog home" in written
     assert "charmap" not in written, "the encoding must not leak into the output"
+
+
+REQUIREMENT = """\
+kind = "buck_converter"
+
+[constraints]
+vin = { min = 4.5, max = 18, unit = "V" }
+iout = ">=1A"
+
+[[preferences]]
+kind = "minimize"
+what = "unit_price"
+"""
+
+
+def test_research_check_reads_a_requirement(tmp_path: Path, capsys) -> None:
+    path = tmp_path / "req.toml"
+    path.write_text(REQUIREMENT, encoding="utf-8")
+
+    assert main(["research", "check", str(path)]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "vin: 4.5V..18V" in out
+    assert "minimize unit_price" in out
+
+
+def test_research_check_needs_no_catalog(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A requirement is checkable on a machine that has nothing set up."""
+    monkeypatch.setenv("KLM_HOME", str(tmp_path / "nowhere"))
+    path = tmp_path / "req.toml"
+    path.write_text(REQUIREMENT, encoding="utf-8")
+    assert main(["research", "check", str(path)]) == EXIT_OK
+
+
+def test_research_check_reports_every_problem_and_fails(tmp_path: Path, capsys) -> None:
+    path = tmp_path / "req.toml"
+    path.write_text('[constrains]\nvin = ">=5V"\n', encoding="utf-8")
+
+    assert main(["research", "check", str(path)]) == EXIT_CHECK_FAILED
+
+    out = capsys.readouterr().out
+    assert "unknown section 'constrains'" in out
+    assert "'kind' is required" in out
+
+
+def test_research_check_writes_back_what_klm_understood(tmp_path: Path, capsys) -> None:
+    path = tmp_path / "req.toml"
+    path.write_text(REQUIREMENT, encoding="utf-8")
+
+    assert main(["research", "check", str(path), "--toml"]) == EXIT_OK
+
+    written = capsys.readouterr().out
+    assert 'iout = { min = 1.0, unit = "A" }' in written, "the shorthand is shown resolved"

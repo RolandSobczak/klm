@@ -28,6 +28,7 @@ without an API key.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -40,6 +41,7 @@ __all__ = [
     "ParameterValue",
     "Resolution",
     "SupplierParameter",
+    "normalise_name",
     "parse_constraint",
     "resolve",
 ]
@@ -199,12 +201,18 @@ class Resolution:
         return lines
 
 
-def _normalise(name: str) -> str:
+def normalise_name(name: str) -> str:
+    """The key two spellings of the same parameter share.
+
+    Public because a requirement's constraint and a supplier's parameter have
+    to agree on what "the same name" means. Two normalisers would agree until
+    one of them learned about a hyphen.
+    """
     return re.sub(r"[^a-z0-9]+", "", name.lower())
 
 
 def resolve(
-    parameters: list[SupplierParameter], constraints: dict[str, str]
+    parameters: list[SupplierParameter], constraints: Mapping[str, str | Constraint]
 ) -> Resolution:
     """Map ``{"Vin max": ">=18V"}`` onto the supplier's parameter identifiers.
 
@@ -212,22 +220,29 @@ def resolve(
     and punctuation removed — and nothing cleverer. A fuzzy match that picked
     "Output voltage" for "voltage" would filter on the wrong axis and report
     success, which is worse than saying it could not find the parameter.
+
+    A value may be the text a human wrote or an already-parsed
+    :class:`Constraint`, which is what a structured requirement holds — so a
+    requirement reaches a supplier search without a round trip through text.
     """
-    by_name = {_normalise(p.name): p for p in parameters}
+    by_name = {normalise_name(p.name): p for p in parameters}
     result = Resolution()
 
     for name, text in constraints.items():
-        parameter = by_name.get(_normalise(name))
+        parameter = by_name.get(normalise_name(name))
         if parameter is None:
             available = ", ".join(sorted(p.name for p in parameters)[:8]) or "none"
             result.unmapped.append((name, f"no such parameter in this category (has: {available})"))
             continue
 
-        try:
-            constraint = parse_constraint(text)
-        except (ValueParseError, UnitError) as exc:
-            result.unmapped.append((name, f"cannot read {text!r}: {exc}"))
-            continue
+        if isinstance(text, Constraint):
+            constraint = text
+        else:
+            try:
+                constraint = parse_constraint(text)
+            except (ValueParseError, UnitError) as exc:
+                result.unmapped.append((name, f"cannot read {text!r}: {exc}"))
+                continue
 
         value_ids, unparsed = parameter.matching(constraint)
         result.unparsed.extend((parameter.name, text) for text in unparsed)
