@@ -125,7 +125,12 @@ jobs:
           # See the POSIX step: `doctor` is a check, and 1 ("something is
           # missing") is the right answer on a runner with no KiCad.
           .\dist\klm\klm.exe doctor
-          if ($LASTEXITCODE -gt 1) { throw "doctor exited $LASTEXITCODE" }
+          $doctor = $LASTEXITCODE
+          if ($doctor -gt 1) { throw "doctor exited $doctor" }
+          # And clear it. GitHub ends a pwsh step with `exit $LASTEXITCODE`, and
+          # cmdlets do not reset it — so a tolerated 1 from a native command
+          # thirty lines earlier fails the step after everything has passed.
+          $global:LASTEXITCODE = 0
           $server = Start-Process -PassThru -FilePath .\dist\klm\klm.exe `
             -ArgumentList "serve","--port","8791"
           try {
@@ -145,6 +150,7 @@ jobs:
           } finally {
             Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
           }
+          exit 0
 
       # -- package ----------------------------------------------------------
 
