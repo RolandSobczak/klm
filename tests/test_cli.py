@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import json
 import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
@@ -1060,3 +1062,28 @@ def test_part_show_json_matches_what_the_api_serves(
     assert payload["mpn"] == part.mpn
     assert payload["status"] == str(part.status)
     assert payload["symbol_hash"] == part.symbol_hash
+
+
+def test_output_survives_a_windows_code_page(
+    home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """klm's glyphs must not turn into a crash on a cp1252 stream.
+
+    This is the Windows failure exactly: `klm doctor` prints `✗`, and a
+    *redirected* stream on Windows encodes with the ANSI code page, which has
+    no such character. It worked in a terminal and died the moment anyone
+    wrote it to a file — so the regression test writes to one.
+    """
+    assert main(["init"]) == EXIT_OK
+
+    buffer = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", buffer)
+    monkeypatch.setattr(sys, "stderr", buffer)
+
+    code = main(["doctor"])
+
+    buffer.flush()
+    written = buffer.buffer.getvalue().decode("utf-8", errors="replace")  # type: ignore[attr-defined]
+    assert code in (EXIT_OK, EXIT_CHECK_FAILED), "a code page must not become an error"
+    assert "catalog home" in written
+    assert "charmap" not in written, "the encoding must not leak into the output"

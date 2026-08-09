@@ -10,6 +10,7 @@ Exit codes are uniform across every command (docs/12 §2):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sqlite3
@@ -627,7 +628,31 @@ def _add_sync_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) 
     promote_cmd.set_defaults(func=cmd_promote)
 
 
+def _make_output_encodable() -> None:
+    """Stop klm's own output from raising on a non-UTF-8 stream.
+
+    klm prints `✓`, `✗`, `⚠` and `→`. On Windows, a *redirected* stream encodes
+    with the ANSI code page — cp1252 for most of the world — and none of those
+    characters exist in it, so `print` raises `UnicodeEncodeError`. The symptom
+    is absurd and was real: `klm doctor` worked in a terminal and died with
+    "'charmap' codec can't encode character" the moment anyone wrote it to a
+    file or a CI log.
+
+    UTF-8 is the right encoding for a redirected stream, and a Windows console
+    already renders these glyphs. `errors="replace"` is the belt-and-braces
+    part: whatever the encoding turns out to be, a character klm cannot spell
+    must never become an exception in place of the answer.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        # A stream that is not a reconfigurable text wrapper — pytest's capture,
+        # a pipe someone replaced — is left alone. Nothing to do about it, and
+        # nothing that justifies refusing to run.
+        with contextlib.suppress(AttributeError, ValueError, OSError):
+            stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    _make_output_encodable()
     parser = build_parser()
     args = parser.parse_args(argv)
 
