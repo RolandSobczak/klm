@@ -214,6 +214,8 @@ class VendorPlan:
     """Old ``lib_id`` → vendored ``lib_id``, for schematic symbols."""
     footprint_map: dict[str, str] = field(default_factory=dict)
     """Old footprint reference → vendored one, for ``Footprint`` fields and the board."""
+    identity_map: dict[str, str] = field(default_factory=dict)
+    """Vendored ``lib_id`` → ``klm_id``, stamped onto the schematic instances."""
     references: dict[str, list[str]] = field(default_factory=dict)
     footprint_only: set[str] = field(default_factory=set)
     unresolved: list[Unvendored] = field(default_factory=list)
@@ -322,7 +324,9 @@ def plan_vendor(
     for lib_id, klm_id in sorted(symbol_refs.items()):
         target = plan.names.symbols.get(klm_id)
         if target:
-            plan.symbol_map[lib_id] = sch.join_lib_id(name, target)
+            vendored = sch.join_lib_id(name, target)
+            plan.symbol_map[lib_id] = vendored
+            plan.identity_map[vendored] = klm_id
 
     for reference in sorted(footprint_refs):
         nickname, bare = sch.split_lib_id(reference)
@@ -607,6 +611,11 @@ def _plan_rewrites(project: KiCadProject, plan: VendorPlan) -> dict[Path, tuple[
         document = _load(sheet)
         count = sch.rewrite_lib_ids(document, plan.symbol_map)
         count += sch.rewrite_footprint_fields(document, plan.footprint_map)
+        # After the lib_ids move, stamp the identity klm just resolved. Without
+        # it a project that predates klm carries no KLM_ID on its instances, and
+        # every feature that keys on one — the BOM, ordering, cost — sees an
+        # empty board.
+        count += sch.stamp_klm_ids(document, plan.identity_map)
         out[sheet] = (count, dumps(document))
     if project.board is not None:
         document = _load(project.board)

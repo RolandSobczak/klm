@@ -139,6 +139,9 @@ These are the things that will bite an implementer who hasn't read the docs.
   has usually moved on.
 - **A fab package is written only if preflight passed.** A package that exists is one somebody will
   upload, so a half-checked one is worse than none. `--check` is the same code path, writing nothing.
+- **Vendoring stamps `KLM_ID` onto schematic instances.** KiCad copies library fields onto an
+  instance at placement, so klm-built boards carry it already — but an adopted board does not, and
+  without the stamp the BOM, ordering and cost all see an empty project.
 - **Supplier splitting needs *set* moves, not just single-line moves.** Crossing a free-shipping
   threshold requires several lines to move together, and every intermediate state costs more than
   either end — a one-line-at-a-time hill-climber sits in that valley and reports the greedy answer.

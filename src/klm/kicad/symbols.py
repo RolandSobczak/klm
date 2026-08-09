@@ -154,11 +154,14 @@ def set_property(symbol: SExp, name: str, value: str, *, hidden: bool = True) ->
             existing.children.insert(2, Atom(value, quoted=True))
         return
 
+    # Spaced explicitly: a quote is self-delimiting, so without this the writer
+    # emits `(property"KLM_ID""01J…"` — valid, parsed correctly by KiCad, and
+    # jarring in a user's schematic beside lines klm preserved verbatim.
     node = SExp(
         [
             Atom("property"),
-            Atom(name, quoted=True),
-            Atom(value, quoted=True),
+            Atom(name, quoted=True, pre=" "),
+            Atom(value, quoted=True, pre=" "),
             SExp([Atom("at"), Atom("0"), Atom("0"), Atom("0")]),
             SExp(
                 [

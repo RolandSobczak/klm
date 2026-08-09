@@ -120,6 +120,7 @@ Global → project. Makes a linked project self-contained.
 6. Rewrite footprint (model …) paths → ${KIPRJMOD}/libraries/packages3d/<file>.step
 7. Rewrite .kicad_sch lib_id:  KLM:X → <name>:X
    Rewrite .kicad_sch Footprint field: KLM:Y → <name>:Y
+   Stamp KLM_ID onto each placed symbol   ← see below
    Rewrite .kicad_pcb footprint refs:  KLM:Y → <name>:Y
 8. Write project sym-lib-table and fp-lib-table (${KIPRJMOD}-relative).
 9. Write klm.lock.json.
@@ -129,6 +130,13 @@ Global → project. Makes a linked project self-contained.
 Steps 7–8 are where the lossless round-trip rule ([03 §3](03-architecture.md#3-the-lossless-round-trip-rule))
 earns its keep. Only `lib_id` nodes, the `Footprint` field value, and `(model …)` paths are
 touched; every other node in the schematic and board is re-serialized byte-identically.
+
+**Step 7 stamps `KLM_ID` onto the schematic instances**, which is not cosmetic. A board built with
+klm gets the field for free — KiCad copies a library symbol's fields onto an instance when it is
+placed. A board that *predates* klm does not, and vendoring alone does not fix it, so every feature
+that identifies a part by `KLM_ID` — the BOM, ordering, cost reporting — finds nothing on exactly
+the projects a user already has. Vendoring already resolved the identity to rewrite the `lib_id`;
+writing it down costs nothing and is the difference between those boards working and not.
 
 Everything is written to a staging directory and moved into place atomically, so an interrupted
 vendor leaves the project untouched.

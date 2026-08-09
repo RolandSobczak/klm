@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from klm.kicad.sexpr import Atom, Document, SExp
+from klm.kicad.symbols import set_property
 
 __all__ = [
     "SymbolInstance",
@@ -26,6 +27,7 @@ __all__ = [
     "rewrite_footprint_fields",
     "rewrite_lib_ids",
     "split_lib_id",
+    "stamp_klm_ids",
 ]
 
 
@@ -276,6 +278,31 @@ def _rename_cached(symbol: SExp, old: str, new: str) -> None:
             if unit.value.startswith(prefix):
                 unit.value = replacement + unit.value[len(prefix) :]
                 break
+
+
+def stamp_klm_ids(doc: Document | SExp, mapping: dict[str, str]) -> int:
+    """Write `KLM_ID` onto each placed symbol, keyed by its (new) ``lib_id``.
+
+    A project built with klm gets this for free: KiCad copies a library symbol's
+    fields onto an instance when it is placed. A project that *predates* klm does
+    not, and vendoring alone does not fix it — which leaves every downstream
+    feature that identifies a part by `KLM_ID` (the BOM, ordering, cost) finding
+    nothing on exactly the boards a user already has.
+
+    So vendoring stamps the identity it just resolved. It is the same fact klm
+    used to rewrite the `lib_id`, written where everything else can read it.
+    """
+    changed = 0
+    for node in _placed_symbols(doc):
+        lib_id_node = node.find("lib_id", recursive=False)
+        if lib_id_node is None or len(lib_id_node) < 2 or not isinstance(lib_id_node[1], Atom):
+            continue
+        klm_id = mapping.get(lib_id_node[1].value)
+        if not klm_id or _property_value(node, "KLM_ID") == klm_id:
+            continue
+        set_property(node, "KLM_ID", klm_id)
+        changed += 1
+    return changed
 
 
 def rewrite_footprint_fields(doc: Document | SExp, mapping: dict[str, str]) -> int:
