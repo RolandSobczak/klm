@@ -17,6 +17,7 @@ trade-off and an accident.
 | [0009](0009-lcsc-manual-first.md) | LCSC is manual-first; klm ships no unofficial-endpoint client | 2 |
 | [0010](0010-vendoring-leaves-unmanaged-libraries-linked.md) | Vendoring aborts on klm's own unresolved symbols, reports everyone else's | 4 |
 | [0011](0011-rotation-corrections-are-learned-not-bundled.md) | Rotation corrections are learned per part; klm bundles none | 5 |
+| [0012](0012-pywebview-shell.md) | A pywebview shell, superseding the Tauri one | 8 |
 
 ## Format
 

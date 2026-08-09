@@ -1,0 +1,62 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>klm</title>
+<link rel="stylesheet" href="/static/app.css">
+<header>
+  <h1>klm</h1>
+  <nav id="tabs">
+    <button data-view="catalog" class="on">Catalog</button>
+    <button data-view="project">Project</button>
+    <button data-view="orders">Ordering</button>
+    <button data-view="stock">Inventory</button>
+    <button data-view="health">Health</button>
+  </nav>
+</header>
+
+<main>
+  <section id="catalog" class="view on">
+    <div class="bar">
+      <input id="search" placeholder="Search MPN, manufacturer, description">
+      <select id="status">
+        <option value="">every status</option>
+        <option value="draft">draft</option>
+        <option value="approved">approved</option>
+        <option value="deprecated">deprecated</option>
+      </select>
+      <button id="generate">Rebuild libraries</button>
+    </div>
+    <div class="split">
+      <table id="parts"><thead><tr><th>MPN<th>Manufacturer<th>Package<th>Status</thead><tbody></tbody></table>
+      <aside id="detail"><p class="muted">Select a part.</p></aside>
+    </div>
+  </section>
+
+  <section id="project" class="view">
+    <div class="bar">
+      <input id="project-path" placeholder="/home/you/pcb/my-board" size="46">
+      <button id="project-open">Open</button>
+      <button id="project-vendor">Vendor</button>
+      <button id="project-verify">Verify (clean room)</button>
+    </div>
+    <div id="project-body"><p class="muted">Open a KiCad project directory.</p></div>
+  </section>
+
+  <section id="orders" class="view">
+    <div class="bar">
+      <input id="build" placeholder="5x my-board:full, 2x psu-board" size="34">
+      <input id="projects-root" placeholder="projects directory" size="26">
+      <button id="plan">Plan order</button>
+    </div>
+    <div id="orders-body"><p class="muted">Describe what you are building.</p></div>
+  </section>
+
+  <section id="stock" class="view">
+    <div class="bar"><input id="location" placeholder="Cabinet A/*"><button id="stock-load">Show</button></div>
+    <div id="stock-body"></div>
+  </section>
+
+  <section id="health" class="view"><div id="health-body"></div></section>
+</main>
+
+<div id="jobs"></div>
+<script src="/static/app.js"></script>

@@ -14,8 +14,9 @@ library sync (`klm vendor` / `unvendor`, the lock file, `klm sync status|pull|pu
 correction table and `klm fab feedback`), and repository scaffolding and CI (`klm verify
 --clean-room`, `klm scaffold`, `klm docs`, `klm report`, timestamp normalisation), and ordering and
 inventory (`klm order plan|export|mark-placed|receive|pin`, `klm stock *`, `klm labels *`). **Q1, Q2, Q3 and Q11 are resolved; Q4 was checked and is
-still open, but no longer blocks anything shipped.** **Q8 is resolved too.** Phase 8 (the desktop
-app) is next; nothing blocks it, and everything it needs already works from the CLI.
+still open, but no longer blocks anything shipped.** **Q8 is resolved too.** Phase 8 (the desktop app) has its API
+and four of its screens; the add-part wizard, SVG previews and the sync diff remain. Phase 9 (the AI
+research agent) is next.
 
 - `README.md` — entry point and documentation map
 - `docs/01`–`docs/15` — the design, one concern per document
@@ -139,6 +140,15 @@ These are the things that will bite an implementer who hasn't read the docs.
   has usually moved on.
 - **A fab package is written only if preflight passed.** A package that exists is one somebody will
   upload, so a half-checked one is worse than none. `--check` is the same code path, writing nothing.
+- **The API translates, it never computes.** Every route in `klm/api/server.py` calls one
+  `klm.services.*` function and shapes the result. The moment a route does arithmetic, the GUI and
+  the CLI start disagreeing about what klm does. A test asserts the part payload matches the
+  service's own object.
+- **The desktop shell is pywebview, not Tauri** (`docs/adr/0012` supersedes `0005`). One wheel, three
+  platforms, no Rust or npm. `klm app` opens a window; a machine with no usable webview degrades to
+  `klm serve` rather than raising.
+- **A job's terminal state is assigned last.** A watcher stops as soon as it sees `done`/`failed`,
+  so setting the state before recording the traceback lets it stop mid-write.
 - **Vendoring stamps `KLM_ID` onto schematic instances.** KiCad copies library fields onto an
   instance at placement, so klm-built boards carry it already — but an adopted board does not, and
   without the stamp the BOM, ordering and cost all see an empty project.

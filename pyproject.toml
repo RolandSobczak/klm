@@ -18,16 +18,28 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
 ]
 
-# Phase 0 deliberately has no runtime dependencies beyond the standard library.
-# The S-expression layer must not depend on anything that could change its output.
+# The core has no runtime dependencies beyond the standard library, and that is
+# load-bearing rather than fastidious: the S-expression layer must not depend on
+# anything that could change its output, and `klm verify --clean-room` has to run
+# on a machine with nothing installed. The desktop app is an extra, so
+# `pip install klm` remains a complete installation.
 dependencies = []
 
 [project.optional-dependencies]
+app = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "pywebview>=5.0",
+]
 dev = [
     "pytest>=8.0",
     "hypothesis>=6.100",
     "ruff>=0.6",
     "mypy>=1.11",
+    # The app extra plus what its test client needs, so `pip install -e .[dev]`
+    # runs the whole suite rather than skipping the API tests silently.
+    "klm[app]",
+    "httpx2",
 ]
 
 [project.scripts]
@@ -38,6 +50,8 @@ Repository = "https://github.com/RolandSobczak/klm"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/klm"]
+# The UI is data, not code: plain files with no build step (docs/adr/0012).
+artifacts = ["src/klm/api/static/*"]
 
 # `cad/scripts/` runs under FreeCAD's interpreter, not klm's, so it is not a
 # Python package and must not be importable. It still has to ship, or an

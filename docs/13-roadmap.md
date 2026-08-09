@@ -215,6 +215,18 @@ the space. See [10 §7](10-ordering-and-inventory.md#why-there-is-no-barcode-yet
 
 **Done when:** a full add-part → vendor → order → fab cycle is doable without the CLI.
 
+**The shell is pywebview, not Tauri** ([ADR-0012](adr/0012-pywebview-shell.md) supersedes
+[ADR-0005](adr/0005-desktop-shell.md)). Tauri would have meant a Rust toolchain, an npm build, three
+CI targets and code-signing certificates — to render views that contain no logic by construction.
+pywebview wraps the platform's own webview, ships in the same wheel, and works on Windows, macOS and
+Linux from `pip install klm[app]`. The cost is a heavier install than a 5 MB signed binary, and a
+Linux box without WebKitGTK falls back to `klm serve`.
+
+Shipped so far: the API with the job/SSE model, and the catalog, project, ordering, inventory and
+health screens. **Not yet built: the add-part wizard, symbol and footprint SVG previews, and the
+side-by-side sync diff** — the three screens that need drawing rather than listing. Everything they
+would call already exists and is tested.
+
 *Deliberately late. Everything it does already works; this phase makes it pleasant. Building it
 earlier would mean building UI against APIs that don't exist yet.*
 

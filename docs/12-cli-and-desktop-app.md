@@ -70,6 +70,10 @@ klm fab [--variant v] [--profile jlcpcb|generic] [--output DIR]
 klm fab feedback <dir> --wrong U3:180 [--confirm-rest] [--generalize]
 klm fab corrections list | set <pattern> <deg> [--source user] | remove <pattern>
 
+DESKTOP APP                                         see docs/adr/0012
+klm app [--port N] [--serve]      native window; falls back to the browser
+klm serve [--port N]              URL only, for SSH and containers
+
 REPOSITORY & CI                                     see doc 15 · all take --project DIR
 klm scaffold [--preset publish|private] [--check] [--update]
 klm verify --clean-room [--format text|json|github] [--require-3d]   no catalog required

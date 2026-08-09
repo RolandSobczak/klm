@@ -278,6 +278,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_repo_parsers(sub)
     _add_ordering_parsers(sub)
 
+    app = sub.add_parser("app", help="Open klm in a desktop window.")
+    app.add_argument("--port", type=int, help="Localhost port (default: a free one).")
+    app.add_argument(
+        "--serve",
+        action="store_true",
+        help="Print a URL and stay in the terminal instead of opening a window.",
+    )
+    app.set_defaults(func=cmd_app)
+
+    serve = sub.add_parser("serve", help="Serve the UI on localhost without a window.")
+    serve.add_argument("--port", type=int)
+    serve.set_defaults(func=cmd_serve)
+
     return parser
 
 
@@ -2616,6 +2629,39 @@ def cmd_labels_scan(args: argparse.Namespace) -> int:
     finally:
         conn.close()
     return EXIT_OK if len(matches) == 1 else EXIT_CHECK_FAILED
+
+
+# ---------------------------------------------------------------------------
+# app / serve
+# ---------------------------------------------------------------------------
+
+
+def cmd_app(args: argparse.Namespace) -> int:
+    """Open the window, or explain why it could not and serve instead."""
+    from klm.api.desktop import WindowUnavailable, run_server, run_window
+
+    paths = Paths.resolve(args.catalog)
+    if not paths.exists():
+        print(f"{_WARN} no catalog at {paths.home} — run `klm init` first")
+    if args.serve:
+        run_server(args.catalog, port=args.port)
+        return EXIT_OK
+    try:
+        run_window(args.catalog, port=args.port)
+    except WindowUnavailable as exc:
+        # A missing webview is a degradation, not a failure: the same UI is one
+        # command away, and saying so beats a traceback (docs/adr/0012).
+        print(f"{_WARN} {exc}")
+        print(f"{_INFO} falling back to the browser")
+        run_server(args.catalog, port=args.port)
+    return EXIT_OK
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    from klm.api.desktop import run_server
+
+    run_server(args.catalog, port=args.port)
+    return EXIT_OK
 
 
 if __name__ == "__main__":  # pragma: no cover
