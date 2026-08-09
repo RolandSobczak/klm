@@ -62,6 +62,11 @@ artifacts = ["src/klm/api/static/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+# The suite shares fixtures through `from tests.projects import …`, which needs
+# the repository root importable. `python -m pytest` adds the working directory
+# and bare `pytest` does not, so without this the suite passes for whoever types
+# the first form and fails in CI, which types the second.
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100

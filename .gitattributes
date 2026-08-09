@@ -1,0 +1,20 @@
+# Line endings are load-bearing here.
+#
+# klm's hardest rule is that parsing a KiCad file and re-serialising it returns
+# byte-identical text, and several tests assert exactly that against fixtures in
+# the repository. Git's default on Windows is `core.autocrlf=true` — including
+# on GitHub's Windows runners — which rewrites every checked-out `\n` to `\r\n`.
+# The fixtures would then differ from what the writer emits, and the round-trip
+# tests would fail on Windows and nowhere else.
+#
+# So: LF in the working tree on every platform, whatever the local git config
+# says. This is not a style preference; it is the same decision as the canonical
+# writer's fixed float precision.
+* text=auto eol=lf
+
+# Binary, so git never inspects or rewrites them.
+*.png binary
+*.ico binary
+*.icns binary
+*.step binary
+*.pdf binary
