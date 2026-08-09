@@ -119,6 +119,7 @@ and no catalog.
 | Every footprint referenced by the PCB exists in the repo | error | |
 | Every `(model …)` path resolves, or the model is deliberately absent | error / info | Absent 3D is fine and expected; a *broken* path is not |
 | No absolute filesystem path anywhere in any project file | error | `/home/rsobczak/...` is the classic leak |
+| A path is a path, not a net name | — | see below |
 | No reference to an undeclared environment variable | error | `${MY_LIBS}` a collaborator doesn't have |
 | `klm.lock.json` matches the vendored library contents | error | Catches a hand-edited library that diverged |
 | ERC clean | error | |
@@ -127,6 +128,18 @@ and no catalog.
 
 The last five are the difference between "it opens" and "it's actually usable" — a project that
 renders correctly but fails DRC isn't ready to hand to anyone either.
+
+**The absolute-path check has to be conservative.** KiCad quotes net names (`/SDA`, `/BAT+`) and
+hierarchical sheet paths (`/3a1f-…/c4d2-…`) exactly like POSIX paths. Flagging every quoted string
+that starts with a slash produced **124 false errors against 2 true ones** on one real board, which
+is a check people learn to ignore. klm requires a directory component *and* a filename with an
+extension, or an unambiguous Windows/UNC prefix. The precise cases — `(model …)` references and
+library-table URIs — are checked by name elsewhere; this is only the backstop for a leak somewhere
+nobody thought to look.
+
+ERC and DRC are not run by `klm verify`: they are `klm fab --check`'s job, and the scaffolded
+workflow runs both. Splitting them keeps verification free of `kicad-cli`, so the same command works
+in a pre-commit hook on a machine that has no KiCad.
 
 ```
 $ klm verify --clean-room
@@ -161,7 +174,9 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    container: kicad/kicad:9.0        # pin exactly — see §7
+    container:
+      image: kicad/kicad:9.0.9-full   # pin exactly — see §7
+      options: --user root            # see the note below
     steps:
       - uses: actions/checkout@v4
         with:
@@ -181,6 +196,21 @@ Note what is *absent*: no secrets, no catalog, no `klm init`. That's deliberate 
 must run on a pull request from a fork, where secrets are unavailable by design. Anything needing
 credentials (live stock checks) goes in a separate, optional workflow that runs only on branches
 in the main repository.
+
+**`options: --user root` is not optional.** The official KiCad image ends with `USER kicad`, while
+a container job's workspace is created by the runner as root — so `actions/checkout` fails on
+permissions before anything else runs. This was found by reading
+[the Dockerfile](https://github.com/KiCad/kicad-docker) rather than by a first broken CI run, and
+without it every scaffolded repository would fail on its first push ([Q11](14-open-questions.md#q11)).
+
+**The `-full` image is the right one**, and it settles a question
+[ADR-0010](adr/0010-vendoring-leaves-unmanaged-libraries-linked.md) deferred to this phase. Clean-
+room verification asks "does this resolve on a machine that has nothing?" — but KiCad's standard
+libraries ship *with KiCad*, so any machine that can open the project has them. The honest
+definition is: no klm catalog, no klm global libraries, no user configuration, but a stock KiCad.
+`-full` provides exactly that, which lets `klm verify` answer the `power:GND` versus
+`Passive:0R_0603` question by *trying to resolve them* — no list to maintain, no dependence on the
+author's machine.
 
 ## 5. The artifacts workflow
 
@@ -263,15 +293,28 @@ Three things will bite, and all three are avoidable.
 gerbers next month. Pin the container tag and the klm version; scaffold writes them explicitly and
 `klm scaffold --check` warns when they drift far behind.
 
-**Gerbers contain timestamps.** Two runs of the same commit produce byte-different files, so you
-cannot diff artifacts across runs to see whether a change affected the output. `klm fab
---normalize-timestamps` zeroes the generation timestamps in Gerber and drill headers, making
-output byte-reproducible. Off by default (some fabs parse those fields), on in CI.
+**Gerbers contain timestamps, and KiCad offers no way out.** Two runs of the same commit produce
+byte-different files, so artifacts cannot be diffed across runs. KiCad does **not** honour
+`SOURCE_DATE_EPOCH` — `GbrMakeCreationDateAttributeString` reads the wall clock unconditionally,
+with no environment override of any kind ([Q11](14-open-questions.md#q11)). So
+`klm fab --normalize-timestamps` post-processes the emitted files. Off by default, on in CI.
 
-**Headless rendering.** Some `kicad-cli` operations have historically needed an X server even for
-non-interactive export; the 3D render path is the usual suspect. The scaffolded workflow wraps
-render steps in `xvfb-run` defensively. Whether this is still required on the targeted KiCad
-version is unverified — see [Q11](14-open-questions.md#q11).
+It **replaces** the timestamp rather than zeroing it, which is a change from what this document
+originally said. A well-formed `%TF.CreationDate,1980-01-01T00:00:00+00:00*%` cannot upset a parser
+that accepted the original, whereas a blanked field plausibly could — so substituting a fixed valid
+value closes the parser risk by construction instead of by testing against an upload. Normalisation
+runs *before* the gerbers are zipped, or the archive would preserve exactly what it came to remove.
+
+**Headless rendering — still unverified, and honestly so.** Some `kicad-cli` operations have
+historically needed an X server even for non-interactive export; `pcb render` is the usual suspect.
+The scaffolded workflow wraps render steps in `xvfb-run`, which costs nothing if unnecessary. This
+is the one part of [Q11](14-open-questions.md#q11) that a first real CI run has to answer, along
+with the exact `kicad-cli` flag surface — KiCad is not installed on the development machine, so
+`klm docs` and the export wrappers are tested against an injected runner rather than the tool.
+
+`klm docs` therefore treats each artifact independently: one that cannot be produced is *reported*
+and the others still are. Losing the schematic PDF because the 3D render wanted a display would be
+a poor trade.
 
 ## 8. `klm.toml`
 
@@ -345,11 +388,11 @@ nobody checks.
 ## 10. Commands
 
 ```bash
-klm scaffold [--preset publish|private] [--check] [--update]
-klm verify --clean-room [--format json|github]
-klm docs --pdf --render --bom --out DIR
-klm report --format github-summary|markdown|json
-klm fab --normalize-timestamps
+klm scaffold [--project .] [--preset publish|private] [--check] [--update]
+klm verify --clean-room [--project .] [--format text|json|github] [--require-3d]
+klm docs [--project .] [--all | --pdf --render --step] [--output DIR]
+klm report [--project .] [--variant v] [--package DIR] [--format markdown|github-summary|json]
+klm fab --normalize-timestamps [--format text|github]
 ```
 
 ## 11. What this deliberately does not do

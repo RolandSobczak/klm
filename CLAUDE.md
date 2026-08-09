@@ -10,10 +10,11 @@ git mirror, library generation and KiCad registration, the field schema, value n
 / `klm offers`, lint group P), the asset pipeline (packages, symbol templates, chip land patterns,
 KiCad standard-library reuse, the QA gate, FreeCAD mesh→STEP, `klm part add`, `klm assets *`), and
 library sync (`klm vendor` / `unvendor`, the lock file, `klm sync status|pull|push|resolve|adopt`,
-`klm promote`), and fabrication output (`klm bom`, `klm fab`, preflight, fab profiles, the rotation
-correction table and `klm fab feedback`). **Q1, Q2 and Q3 are resolved; Q4 was checked and is still
-open, but no longer blocks anything shipped.** Phase 6 (repository scaffolding and CI) is next;
-**Q11 — KiCad in CI — should be checked before starting it.**
+`klm promote`), fabrication output (`klm bom`, `klm fab`, preflight, fab profiles, the rotation
+correction table and `klm fab feedback`), and repository scaffolding and CI (`klm verify
+--clean-room`, `klm scaffold`, `klm docs`, `klm report`, timestamp normalisation). **Q1, Q2, Q3 and Q11 are resolved; Q4 was checked and is
+still open, but no longer blocks anything shipped.** Phase 7 (ordering and inventory) is next;
+nothing blocks it, though **Q8 (VAT and import charges) shapes its cost modelling**.
 
 - `README.md` — entry point and documentation map
 - `docs/01`–`docs/15` — the design, one concern per document
@@ -137,6 +138,19 @@ These are the things that will bite an implementer who hasn't read the docs.
   has usually moved on.
 - **A fab package is written only if preflight passed.** A package that exists is one somebody will
   upload, so a half-checked one is worse than none. `--check` is the same code path, writing nothing.
+- **`klm verify --clean-room` takes a project and nothing else — no connection, no config, no
+  `Paths`.** The signature is the guarantee, and a test asserts it. A checker that could reach the
+  catalog would pass on the one machine where passing means nothing. It deliberately does *not* run
+  ERC/DRC either, so it works in a pre-commit hook on a machine with no KiCad; `klm fab --check`
+  owns those.
+- **"A machine that has nothing" still has KiCad.** Stock libraries ship with KiCad, so `power:GND`
+  legitimately resolves in CI (the workflow pins the `-full` image). Verification answers this by
+  *trying to resolve*, never by a list of library names.
+- **Generated workflows need `options: --user root`.** The official KiCad image ends with
+  `USER kicad`; without it `actions/checkout` fails on permissions. See `docs/14` Q11.
+- **KiCad ignores `SOURCE_DATE_EPOCH`.** Gerber timestamps are rewritten by klm after export, and
+  *replaced* with a fixed valid value rather than blanked — a well-formed field carries no parser
+  risk. It must happen before the gerbers are zipped.
 - **`klm verify --clean-room` must run with no catalog and no configuration.** It is a separate
   code path from `klm lint` (which assumes the catalog), because its whole job is to behave like a
   stranger's machine. Self-containment is defined by that check passing in CI, not by the project
@@ -145,9 +159,8 @@ These are the things that will bite an implementer who hasn't read the docs.
 
 ## Before building anything
 
-`docs/14-open-questions.md` is the risk register. Q1, Q2 and Q3 are resolved (2026-08-09). **Q11
-(KiCad in CI — container, headless rendering, gerber determinism) is the one to check before
-starting Phase 6**, and it is the phase that finally exercises `kicad-cli` for real.
+`docs/14-open-questions.md` is the risk register. Q1, Q2, Q3 and Q11 are resolved (2026-08-09).
+Q4–Q10 and Q12 remain; none blocks Phase 7.
 
 - **Q1 — resolved.** TME's auth is signature-based, not OAuth: HMAC-SHA1 over
   `POST&<enc URL>&<enc sorted query>`, base64, sent as `ApiSignature`. Still unverified: published

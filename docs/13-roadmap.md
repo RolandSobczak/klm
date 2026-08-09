@@ -160,6 +160,17 @@ machine. That is the standing gap for this phase.
 **Done when:** a PR that half-vendors a project fails CI with the offending `lib_id` annotated in
 the diff, and a merge to `main` produces a downloadable fab package and schematic PDF.
 
+The first half is done and tested: `klm verify --clean-room --format github` emits an annotation
+naming the file and the reference. The second half is written and cannot be *proven* here — KiCad
+is not installed on the development machine, so `klm docs` and the export wrappers are exercised
+against an injected runner. The first real CI run is what confirms the `kicad-cli` flag surface and
+whether `pcb render` still needs `xvfb`; both are the residue of [Q11](14-open-questions.md#q11),
+which is otherwise resolved.
+
+Q11 also turned up the thing that would have broken every generated workflow on its first push: the
+official KiCad image runs as a non-root user, so a container job needs `options: --user root` or
+`actions/checkout` fails on permissions.
+
 *Depends on phases 4 and 5 — it has nothing to verify until vendoring exists, and nothing to
 publish until fab output does. Sequenced immediately after them because the clean-room check is
 what makes the phase-4 guarantee real rather than assumed. See

@@ -70,9 +70,11 @@ klm fab [--variant v] [--profile jlcpcb|generic] [--output DIR]
 klm fab feedback <dir> --wrong U3:180 [--confirm-rest] [--generalize]
 klm fab corrections list | set <pattern> <deg> [--source user] | remove <pattern>
 
-REPOSITORY & CI                                     see doc 15
+REPOSITORY & CI                                     see doc 15 · all take --project DIR
 klm scaffold [--preset publish|private] [--check] [--update]
-klm verify --clean-room [--format json|github]      no catalog required
+klm verify --clean-room [--format text|json|github] [--require-3d]   no catalog required
+klm docs [--all | --pdf --render --step] [--output DIR]
+klm report [--variant v] [--package DIR] [--format markdown|github-summary|json]
 klm docs --pdf --render --bom --out DIR
 klm report --format github-summary|markdown|json
 

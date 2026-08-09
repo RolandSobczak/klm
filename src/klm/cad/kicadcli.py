@@ -253,3 +253,23 @@ class KiCadCli:
     def export_schematic_pdf(self, schematic: Path, output: Path) -> CliResult:
         output.parent.mkdir(parents=True, exist_ok=True)
         return self.check("sch", "export", "pdf", "--output", str(output), str(schematic))
+
+    def render_board(self, board: Path, output: Path, *, side: str = "top") -> CliResult:
+        """A picture of the board. The path most likely to want an X server.
+
+        Reviewing a PCB change from a unified diff of S-expressions is not
+        realistic; reviewing it from two images is.
+        """
+        output.parent.mkdir(parents=True, exist_ok=True)
+        return self.check(
+            "pcb", "render", "--output", str(output), "--side", side,
+            "--quality", "high", str(board),
+        )
+
+    def export_step(self, board: Path, output: Path) -> CliResult:
+        """The board as a solid, for enclosure and interference work."""
+        output.parent.mkdir(parents=True, exist_ok=True)
+        return self.check(
+            "pcb", "export", "step", "--output", str(output),
+            "--subst-models", "--no-dnp", str(board),
+        )
