@@ -39,6 +39,12 @@ Repository = "https://github.com/RolandSobczak/klm"
 [tool.hatch.build.targets.wheel]
 packages = ["src/klm"]
 
+# `cad/scripts/` runs under FreeCAD's interpreter, not klm's, so it is not a
+# Python package and must not be importable. It still has to ship, or an
+# installed klm cannot convert a mesh.
+[tool.hatch.build.targets.wheel.force-include]
+"cad" = "klm/_cad"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"

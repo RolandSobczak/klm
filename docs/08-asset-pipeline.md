@@ -12,13 +12,44 @@ asset set:
 |---|---|---|---|
 | 1 | **Already in the catalog** | Any part whose footprint/package already exists | Best — reuse is free and consistent |
 | 2 | **KiCad standard libraries** | Generic passives, connectors, common ICs | Excellent, well-tested, no licensing question |
-| 3 | **Generated from a template** | Parametric packages: 0402…1210, SOT-23-x, SOIC-N, QFN, LQFP | Excellent and fully deterministic |
-| 4 | **EasyEDA / LCSC import** | Almost everything with an LCSC number | Variable — needs QA |
+| 3 | **Generated from a template** | Two-terminal passive symbols; chip land patterns 0201…2512 | Excellent and fully deterministic |
+| 4 | ~~EasyEDA / LCSC import~~ | — | **Not implemented**, see below |
 | 5 | **Hand-drawn** | Everything else | Whatever you make it |
 
 Priority 1 is the one that matters most for library hygiene: a new 0402 resistor should never
 create a new footprint asset. The pipeline checks `package` against existing assets first, and
 reuse is the common case.
+
+There is deliberately **no catalog-reuse step for symbols**, only for footprints and 3D models. A
+symbol carries the part's own name and `Value`, so `RC0402FR-074K7L` and `RC0402FR-0710KL` cannot
+share one. Sharing pays where the file is genuinely identical, and that is the other two kinds.
+
+### Why source 4 is not implemented
+
+Two independent reasons, either sufficient:
+
+- [ADR-0009](adr/0009-lcsc-manual-first.md) established that klm ships no client against LCSC's
+  unofficial endpoints. The EasyEDA component API is exactly such an endpoint.
+- [Q4](14-open-questions.md#q4) — whether EasyEDA-derived assets may be redistributed in a public
+  repository — was checked and remains **unanswered**, and vendoring assets into a GitHub project
+  is precisely the case it covers. An absent answer is not a permissive one.
+
+`klm assets acquire` therefore reports what it could not get rather than pretending. In practice
+the gap is narrower than it looks: sources 1–3 cover passives, chip packages and every part whose
+package KiCad's libraries already carry, which is the bulk of a hobby library.
+
+### What klm generates, and what it refuses to
+
+klm generates **two-terminal chip land patterns only** (0201 through 2512), by the IPC-7351B
+density-level-B construction. Their geometry is two rectangles derived from dimensions that are not
+in dispute: an 0402 is 1.0 x 0.5 mm by definition of the name. Generated patterns land within about
+0.05 mm of KiCad's equivalents and carry the same names, so gaining KiCad's libraries later is a
+footprint substitution rather than a rename across every schematic.
+
+klm does **not** generate SOT, SOIC, QFN or LQFP land patterns. Reconstructing a fine-pitch IPC
+pattern from a table would produce a footprint that looks right, passes a visual check, and does
+not solder. Those packages are named in klm's table so it can *find* them in KiCad's libraries and
+check a pin count against them — nothing more.
 
 ## 2. Symbols
 
@@ -154,15 +185,31 @@ cannot ignore.
 ## 7. Commands
 
 ```bash
-klm part add --lcsc C8734                 # full pipeline from an LCSC number
-klm part add --mpn STM32F103C8T6 --mfr ST # resolve via suppliers, then assets
-klm part add --interactive                # guided; asks at each ambiguity
+klm part add --mpn RC0402FR-074K7L --mfr Yageo \
+             --category Passive/Resistor --package 0402 \
+             --value 4700 --field Tolerance=1% --field Power=0.063W \
+             --lcsc C25900
 
-klm assets acquire <klm_id>               # (re)run acquisition for an existing part
-klm assets qa <klm_id>                    # re-run the QA gate
-klm assets convert-3d <path.obj>          # one-off mesh → STEP
-klm assets reuse-check                    # find near-duplicate footprints in the catalog
+klm part add --mpn STM32F103C8T6 --package LQFP-48   # manufacturer from TME, if configured
+klm part add … --offline                             # do not consult suppliers
+
+klm assets acquire <id|mpn> [--overwrite]  # (re)run acquisition for an existing part
+klm assets qa [<id|mpn>] [--format json]   # re-run the QA gate
+klm assets convert-3d <path.obj> [--part]  # mesh → STEP, optionally attaching it
+klm assets reuse-check                     # find near-duplicate footprints in the catalog
 ```
+
+`--lcsc` records the part number as an offer; it does not fetch anything, because LCSC is
+manual-first ([ADR-0009](adr/0009-lcsc-manual-first.md)). `--field NAME=VALUE` is repeatable and
+writes both a symbol field and a user-sourced parameter — the same fact from two sources, which is
+what the provenance model is for.
+
+`--value` is **normalized on the way in** where the category implies a unit, so
+`--value 0.1uF` stores `100nF` and lints clean the moment the part exists rather than being
+reported by V001 against something klm just wrote.
+
+The result is always a `draft`. A part that arrived automatically has not been looked at by a
+human, and only `approved` parts are usable in a design.
 
 `reuse-check` deserves a mention: it compares footprints by pad geometry rather than name and
 reports candidates for merging. Catalog hygiene decays silently otherwise, and a duplicate

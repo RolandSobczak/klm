@@ -9,16 +9,22 @@ variable.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import PurePath
 
-from klm.kicad.sexpr import Atom, Document, SExp
+from klm.kicad.sexpr import Atom, Document, Node, SExp
 
 __all__ = [
+    "PadInfo",
     "absolute_model_paths",
     "footprint_name",
+    "graphics_on",
     "is_absolute_model_path",
+    "iter_pads",
+    "layer_of",
     "model_paths",
     "rewrite_model_paths",
+    "segment_points",
 ]
 
 #: `/home/rs/…`, `C:\…` and `\\server\…`. A `${VAR}/…` reference is portable
@@ -80,3 +86,106 @@ def rewrite_model_paths(
             target.value = rewritten
             count += 1
     return count
+
+
+@dataclass(frozen=True, slots=True)
+class PadInfo:
+    """One pad of a footprint, as the QA gate needs to see it."""
+
+    number: str
+    pad_type: str
+    """`smd` | `thru_hole` | `np_thru_hole` | `connect`."""
+    shape: str
+    x: float
+    y: float
+    width: float
+    height: float
+    layers: tuple[str, ...] = ()
+
+    @property
+    def plated(self) -> bool:
+        """Whether this pad is electrically connected to anything.
+
+        A mounting hole is `np_thru_hole` and carries no pad number worth
+        matching against a symbol pin, which is why the pin/pad count check
+        has to ask.
+        """
+        return self.pad_type != "np_thru_hole"
+
+    def overlaps(self, x: float, y: float, *, margin: float = 0.0) -> bool:
+        """Whether a point falls inside the pad, expanded by ``margin``."""
+        return (
+            abs(x - self.x) <= self.width / 2 + margin
+            and abs(y - self.y) <= self.height / 2 + margin
+        )
+
+
+def iter_pads(doc: Document | SExp) -> list[PadInfo]:
+    """Every pad, in file order."""
+    root = doc.root if isinstance(doc, Document) else doc
+    pads: list[PadInfo] = []
+    for node in root.find_all("pad"):
+        if len(node) < 4:
+            continue
+        number, pad_type, shape = (_atom(node[i]) for i in (1, 2, 3))
+        at = node.find("at", recursive=False)
+        size = node.find("size", recursive=False)
+        layers = node.find("layers", recursive=False)
+        pads.append(
+            PadInfo(
+                number=number,
+                pad_type=pad_type,
+                shape=shape,
+                x=_number(at, 1),
+                y=_number(at, 2),
+                width=_number(size, 1),
+                height=_number(size, 2),
+                layers=tuple(_atom(item) for item in (layers.children[1:] if layers else [])),
+            )
+        )
+    return pads
+
+
+def layer_of(node: SExp) -> str:
+    """The layer a graphic item sits on, or `''` if it declares none."""
+    layer = node.find("layer", recursive=False)
+    return _atom(layer[1]) if layer is not None and len(layer) >= 2 else ""
+
+
+def graphics_on(doc: Document | SExp, layer: str) -> list[SExp]:
+    """Graphic items (`fp_line`, `fp_rect`, `fp_poly`, `fp_arc`, `fp_circle`) on a layer."""
+    root = doc.root if isinstance(doc, Document) else doc
+    kinds = ("fp_line", "fp_rect", "fp_poly", "fp_arc", "fp_circle")
+    return [
+        node
+        for node in root.children
+        if isinstance(node, SExp) and node.name in kinds and layer_of(node) == layer
+    ]
+
+
+def segment_points(node: SExp) -> list[tuple[float, float]]:
+    """Every explicit coordinate of a graphic item, for extent and closure checks."""
+    points: list[tuple[float, float]] = []
+    for tag in ("start", "end", "center", "mid"):
+        for child in node.find_all(tag):
+            points.append((_number(child, 1), _number(child, 2)))
+    for pts in node.find_all("pts"):
+        for xy in pts.find_all("xy"):
+            points.append((_number(xy, 1), _number(xy, 2)))
+    return points
+
+
+def _atom(item: Node | None) -> str:
+    return item.value if isinstance(item, Atom) else ""
+
+
+def _number(node: SExp | None, index: int) -> float:
+    if node is None or len(node) <= index:
+        return 0.0
+    item = node[index]
+    if not isinstance(item, Atom):
+        return 0.0
+    try:
+        return float(item.value)
+    except ValueError:
+        return 0.0

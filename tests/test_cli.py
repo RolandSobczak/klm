@@ -8,7 +8,10 @@ from pathlib import Path
 
 import pytest
 
+from klm.assets.kicad_libs import default_libraries
+from klm.cad.freecad import FreeCadUnavailable
 from klm.cli.main import EXIT_CHECK_FAILED, EXIT_ERROR, EXIT_OK, main, parse_age
+from klm.model import PartStatus
 from klm.services.catalog import get_part, list_parts
 from klm.store import AssetKind, AssetStore, Paths, connect, resolve_home
 from klm.store.db import SCHEMA_VERSION
@@ -479,3 +482,193 @@ def test_refresh_does_not_reach_the_network_for_a_manual_supplier(
 
     assert main(["refresh", "--supplier", "lcsc"]) == EXIT_OK
     assert "0 newly linked" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# part add / assets
+# ---------------------------------------------------------------------------
+
+KICAD_FIXTURES = Path(__file__).parent / "fixtures" / "kicad"
+
+
+@pytest.fixture
+def kicad_libs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Point library discovery at the fixture tree, and clear its cache."""
+    monkeypatch.setenv("KICAD9_SYMBOL_DIR", str(KICAD_FIXTURES / "symbols"))
+    monkeypatch.setenv("KICAD9_FOOTPRINT_DIR", str(KICAD_FIXTURES / "footprints"))
+    default_libraries.cache_clear()
+    yield
+    default_libraries.cache_clear()
+
+
+def test_part_add_creates_a_draft_with_assets(
+    home: Path, kicad_libs: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "part", "add",
+                "--mpn", "RC0402FR-074K7L",
+                "--mfr", "Yageo",
+                "--category", "Passive/Resistor",
+                "--package", "0402",
+                "--value", "4700",
+                "--description", "4.7k 1% 0402",
+                "--field", "Tolerance=1%",
+                "--field", "Power=0.063W",
+                "--datasheet", "https://example.invalid/ds.pdf",
+                "--offline",
+            ]
+        )
+        == EXIT_OK
+    )
+    out = capsys.readouterr().out
+    assert "created" in out
+    assert "footprint" in out
+
+    conn = connect(Paths(home).db, create=False)
+    try:
+        (part,) = list_parts(conn)
+    finally:
+        conn.close()
+    assert part.status is PartStatus.DRAFT
+    assert part.symbol_hash and part.footprint_hash
+
+
+def test_a_part_added_by_klm_lints_clean(
+    home: Path, kicad_libs: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The point of the pipeline: what it produces does not need fixing."""
+    assert main(["init"]) == EXIT_OK
+    main(
+        [
+            "part", "add",
+            "--mpn", "RC0402FR-074K7L",
+            "--mfr", "Yageo",
+            "--category", "Passive/Resistor",
+            "--package", "0402",
+            "--value", "0.0047k",
+            "--description", "4.7k 1% 0402",
+            "--field", "Tolerance=1%",
+            "--field", "Power=0.063W",
+            "--offline",
+        ]
+    )
+    capsys.readouterr()
+
+    assert main(["lint", "--select", "S,V", "--max-severity", "warning"]) == EXIT_OK
+
+
+def test_the_value_is_normalized_on_the_way_in(
+    home: Path, kicad_libs: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    main(
+        [
+            "part", "add",
+            "--mpn", "CL05B104KO5NNNC",
+            "--mfr", "Samsung",
+            "--category", "Passive/Capacitor/Ceramic",
+            "--package", "0402",
+            "--value", "0.1uF",
+            "--offline",
+        ]
+    )
+    capsys.readouterr()
+
+    conn = connect(Paths(home).db, create=False)
+    store = AssetStore(Paths(home).assets)
+    try:
+        (part,) = list_parts(conn)
+    finally:
+        conn.close()
+    assert part.symbol_hash is not None
+    assert '"100nF"' in store.read_text(part.symbol_hash, AssetKind.SYMBOL)
+
+
+def test_a_malformed_field_pair_is_refused(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    capsys.readouterr()
+
+    assert main(["part", "add", "--mpn", "X", "--field", "Tolerance", "--offline"]) == EXIT_ERROR
+
+
+def test_assets_qa_reports_and_exits_zero_when_clean(
+    home: Path, kicad_libs: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    main([
+        "part", "add", "--mpn", "RC0402FR-074K7L", "--mfr", "Yageo",
+        "--category", "Passive/Resistor", "--package", "0402", "--offline",
+    ])
+    capsys.readouterr()
+
+    assert main(["assets", "qa"]) == EXIT_OK
+    assert "no blocking failures" in capsys.readouterr().out
+
+
+def test_assets_qa_json_is_machine_readable(
+    home: Path, kicad_libs: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    main([
+        "part", "add", "--mpn", "RC0402FR-074K7L", "--mfr", "Yageo",
+        "--category", "Passive/Resistor", "--package", "0402", "--offline",
+    ])
+    capsys.readouterr()
+
+    main(["assets", "qa", "--format", "json"])
+    payload = json.loads(capsys.readouterr().out)
+    (reports,) = payload.values()
+    assert reports["symbol"]["status"] == "pass"
+
+
+def test_assets_acquire_on_an_already_complete_part_does_nothing(
+    home: Path, kicad_libs: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    main([
+        "part", "add", "--mpn", "RC0402FR-074K7L", "--mfr", "Yageo",
+        "--category", "Passive/Resistor", "--package", "0402", "--offline",
+    ])
+    capsys.readouterr()
+
+    assert main(["assets", "acquire", "RC0402FR-074K7L"]) == EXIT_OK
+    assert "nothing to do" in capsys.readouterr().out
+
+
+def test_reuse_check_is_quiet_on_a_healthy_catalog(
+    home: Path, kicad_libs: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    main([
+        "part", "add", "--mpn", "RC0402FR-074K7L", "--mfr", "Yageo",
+        "--category", "Passive/Resistor", "--package", "0402", "--offline",
+    ])
+    capsys.readouterr()
+
+    assert main(["assets", "reuse-check"]) == EXIT_OK
+    assert "no duplicate footprints" in capsys.readouterr().out
+
+
+def test_convert_3d_without_freecad_degrades(
+    home: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("klm.cli.main.convert_mesh", _no_freecad)
+    assert main(["init"]) == EXIT_OK
+    mesh = tmp_path / "part.obj"
+    mesh.write_text("v 0 0 0\n", encoding="utf-8")
+    capsys.readouterr()
+
+    assert main(["assets", "convert-3d", str(mesh)]) == EXIT_CHECK_FAILED
+    assert "freecadcmd" in capsys.readouterr().out
+
+
+def _no_freecad(*args: object, **kwargs: object) -> None:
+    raise FreeCadUnavailable("freecadcmd was not found; 3D models stay as meshes.")
