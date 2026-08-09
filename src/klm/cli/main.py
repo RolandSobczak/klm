@@ -17,6 +17,9 @@ from collections.abc import Sequence
 
 from klm import __version__
 from klm.environment import find_kicad_config, probe_all
+from klm.serial.part_file import to_yaml
+from klm.services.catalog import list_parts
+from klm.services.exporter import PART_FILE, export_catalog, import_catalog
 from klm.store import AssetKind, AssetStore, Paths, connect, migrate
 from klm.store.db import SCHEMA_VERSION, user_version
 
@@ -59,6 +62,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Also re-hash every stored asset to detect on-disk corruption.",
     )
     doctor.set_defaults(func=cmd_doctor)
+
+    export = sub.add_parser("export", help="Write the catalog to its git-versioned mirror.")
+    export.add_argument(
+        "--prune",
+        action="store_true",
+        help="Delete exported directories for parts no longer in the database.",
+    )
+    export.add_argument(
+        "--check",
+        action="store_true",
+        help="Report what would change without writing; non-zero if anything would.",
+    )
+    export.set_defaults(func=cmd_export)
+
+    importer = sub.add_parser("import", help="Rebuild the database from the mirror.")
+    importer.add_argument(
+        "--strict",
+        action="store_true",
+        help="Stop at the first malformed file instead of collecting errors.",
+    )
+    importer.set_defaults(func=cmd_import)
 
     return parser
 
@@ -251,6 +275,86 @@ def _report_assets(paths: Paths, *, deep: bool) -> int:
 
     print(f"{_OK} integrity      all {total} assets verified")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# export / import
+# ---------------------------------------------------------------------------
+
+
+def _require_catalog(paths: Paths) -> None:
+    if not paths.exists():
+        raise FileNotFoundError(f"no catalog at {paths.home} — run: klm init")
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+
+    conn = connect(paths.db, create=False)
+    try:
+        if args.check:
+            return _export_check(conn, paths)
+        result = export_catalog(conn, paths.catalog, prune=args.prune)
+    finally:
+        conn.close()
+
+    if not result.written and not result.removed:
+        print(f"{_OK} {result.total} parts already up to date in {paths.catalog}")
+        return EXIT_OK
+
+    for klm_id in result.written:
+        print(f"  wrote   {klm_id}")
+    for klm_id in result.removed:
+        print(f"  removed {klm_id}")
+    print(
+        f"{_OK} exported {result.total} parts "
+        f"({len(result.written)} changed, {len(result.unchanged)} unchanged)"
+    )
+    return EXIT_OK
+
+
+def _export_check(conn: sqlite3.Connection, paths: Paths) -> int:
+    """Report drift without writing. Used in a pre-commit hook and in CI."""
+    stale: list[str] = []
+    for part in list_parts(conn):
+        target = paths.part_dir(part.klm_id) / PART_FILE
+        content = to_yaml(part)
+        if not target.exists() or target.read_text(encoding="utf-8") != content:
+            stale.append(part.klm_id)
+
+    if not stale:
+        print(f"{_OK} export is up to date")
+        return EXIT_OK
+
+    for klm_id in stale:
+        print(f"  stale   {klm_id}")
+    print(f"{_FAIL} {len(stale)} parts differ from the mirror — run: klm export")
+    return EXIT_CHECK_FAILED
+
+
+def cmd_import(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+
+    conn = connect(paths.db, create=False)
+    try:
+        result = import_catalog(conn, paths.catalog, strict=args.strict)
+    finally:
+        conn.close()
+
+    print(
+        f"{_OK} imported: {len(result.created)} created, "
+        f"{len(result.updated)} updated, {len(result.unchanged)} unchanged"
+    )
+    if result.errors:
+        print()
+        for path, message in result.errors:
+            print(f"{_FAIL} {path}")
+            print(f"    {message}")
+        print(f"\n{len(result.errors)} file(s) could not be imported.")
+        return EXIT_CHECK_FAILED
+    return EXIT_OK
 
 
 if __name__ == "__main__":  # pragma: no cover
