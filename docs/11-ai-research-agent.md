@@ -107,9 +107,9 @@ Defined with strict JSON schemas and executed by klm, never by the model.
 | ✓ `footprint_lookup` | Does the catalog already have this package? | Drives the reuse preference |
 | ✓ `datasheet_fetch` | Download and cache a datasheet PDF | Returns a handle — the file's hash — not raw text |
 | ✓ `datasheet_extract` | Pull parameters from a cached datasheet | Returns page + quote per parameter, and drops anything uncited |
-| ○ `propose_part` | Emit a structured candidate | The only "write" — and it writes to a review queue, not the catalog |
+| ✓ `propose_part` | Emit a structured candidate | The only "write" — and it writes to a review queue, not the catalog |
 
-`klm.research.tools`; ✓ is built, ○ arrives with the proposal queue. `klm research tools` lists what a session would have *on this
+`klm.research.tools`, all built. `klm research tools` lists what a session would have *on this
 machine*, which is worth being able to ask before spending anything.
 
 Notably absent: any tool that writes to the catalog, edits a file, or spends money. The agent
@@ -265,10 +265,11 @@ difference between a clear message and an `IndexError` is that check.
 | Guardrail | Mechanism |
 |---|---|
 | **Cannot write to the catalog** | No tool exists. `propose_part` writes to a review queue. |
-| **Every parameter cited** | `datasheet_extract` returns page + quote, **and the quote comes from the API's citation machinery rather than from the model**. A parameter stated in an uncited block is dropped and reported, never returned as a value |
+| **Every parameter cited** | `datasheet_extract` returns page + quote, **and the quote comes from the API's citation machinery rather than from the model**. A parameter stated in an uncited block is dropped and reported, never returned as a value. The same ledger checks it again at `propose_part`: a quote klm never read does not reach the proposal |
 | **Conflicts surfaced, not resolved** | When a datasheet and a supplier field disagree, both are recorded and the candidate is flagged for review |
 | **Stock and lifecycle verified** | Claims about availability come from a live offer, never from the model's recollection |
-| **No invented part numbers** | Every proposed MPN must be traceable to a supplier search result. Unbacked MPNs are dropped before review |
+| **No invented part numbers** | **Mechanical, not prompted**: `klm.research.tools.Ledger` records every MPN a tool *returned*, and `propose_part` refuses one that is not in it. A plausible part number that does not exist survives review, gets ordered, and comes back three weeks later as nothing |
+| **Every concern stated** | A proposal with an empty `concerns` list is refused. A candidate with nothing wrong with it is one that has not been looked at hard enough |
 | **Bounded** | Iteration cap, token budget per session, and a spend ceiling — all three checked *before* each request, because a limit that trips only once exceeded is a limit that is always exceeded |
 | **Logged** | Every session's tool calls and results go to `event_log`, so a bad part can be traced to the reasoning that produced it |
 

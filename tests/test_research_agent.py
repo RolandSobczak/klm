@@ -98,7 +98,11 @@ def test_the_requirement_is_what_the_model_is_asked(toolset) -> None:  # type: i
     first = model.calls[0]
     assert "iout: >=1A" in first["messages"][0]["content"]
     assert "never disqualify" in first["messages"][0]["content"]
-    assert {tool["name"] for tool in first["tools"]} == {"catalog_search", "footprint_lookup"}
+    assert {tool["name"] for tool in first["tools"]} == {
+        "catalog_search",
+        "footprint_lookup",
+        "propose_part",
+    }
 
 
 def test_assistant_content_goes_back_verbatim(toolset) -> None:  # type: ignore[no-untyped-def]
@@ -139,9 +143,9 @@ def test_several_tool_calls_come_back_in_one_message(toolset) -> None:  # type: 
 def test_an_unknown_tool_is_answered_not_raised(toolset) -> None:  # type: ignore[no-untyped-def]
     """The agent can recover from asking for something that isn't there."""
     model = FakeModel(
-        Reply(text="", tool_calls=(ToolCall("t1", "propose_part", {"mpn": "X"}),),
+        Reply(text="", tool_calls=(ToolCall("t1", "order_it_for_me", {"mpn": "X"}),),
               stop_reason="tool_use"),
-        Reply(text="I could not propose it."),
+        Reply(text="I could not order it."),
     )
 
     transcript = run(model, toolset)

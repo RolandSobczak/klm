@@ -120,11 +120,17 @@ def call(tools: Toolset, name: str, **arguments: object) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_no_tool_writes_anything(toolset: Toolset) -> None:
+def test_no_tool_writes_to_the_catalog(toolset: Toolset) -> None:
     """The guarantee is the tool list, not the prompt (docs/adr/0006)."""
     names = {tool.name for tool in toolset.tools}
-    assert names == {"catalog_search", "footprint_lookup", "supplier_search", "supplier_get_offer"}
-    for banned in ("propose", "save", "add", "write", "order", "delete", "edit"):
+    assert names == {
+        "catalog_search",
+        "footprint_lookup",
+        "supplier_search",
+        "supplier_get_offer",
+        "propose_part",
+    }
+    for banned in ("save", "add_part", "write", "order", "delete", "edit", "approve"):
         assert not any(banned in name for name in names)
 
 
@@ -151,7 +157,7 @@ def test_a_supplier_with_no_credentials_removes_its_tools(env) -> None:  # type:
     _, conn, store = env
     tools = build_toolset(ResearchContext(conn=conn, store=store, adapters={}))
     names = {tool.name for tool in tools.tools}
-    assert names == {"catalog_search", "footprint_lookup"}, "absence removes the tool"
+    assert names == {"catalog_search", "footprint_lookup", "propose_part"}
 
 
 def test_every_schema_refuses_what_it_did_not_ask_for(toolset: Toolset) -> None:
@@ -173,7 +179,7 @@ def test_definitions_are_what_the_api_is_told(toolset: Toolset) -> None:
 
 
 def test_an_unknown_tool_is_a_result_not_an_exception(toolset: Toolset) -> None:
-    payload = call(toolset, "propose_part", mpn="X")
+    payload = call(toolset, "order_it_for_me", mpn="X")
     assert "no tool named" in payload["error"]
     assert "catalog_search" in payload["available"]
 

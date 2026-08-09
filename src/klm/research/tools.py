@@ -46,6 +46,7 @@ behaves is not a guardrail.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -58,6 +59,12 @@ from klm.model import Offer, Part, PartStatus
 from klm.services.assets import footprint_availability
 from klm.services.catalog import CatalogError, search_parts
 from klm.services.datasheets import BinaryTransport, DatasheetError, extract, fetch, load
+from klm.services.proposals import (
+    CitedParameter,
+    ConstraintCheck,
+    Proposal,
+    ProposedOffer,
+)
 from klm.store.assets import AssetError, AssetStore
 from klm.suppliers.base import SearchHit, SupplierAdapter, SupplierError
 from klm.units import UnitError, ValueParseError
@@ -165,6 +172,50 @@ class Tool:
 
 
 @dataclass
+class Ledger:
+    """What this session has actually been told, and what it wants to propose.
+
+    The two sets are the mechanical form of two guardrails that would otherwise
+    be prompt instructions:
+
+    * **`mpns`** — every part number a tool has *returned*. `propose_part`
+      refuses anything not in it, which makes an invented MPN impossible rather
+      than discouraged. A plausible part number that does not exist is the most
+      expensive hallucination in this domain, and it survives review.
+    * **`quotes`** — every passage `datasheet_extract` cited. A parameter whose
+      quote is not among them did not come from a datasheet klm read, so it is
+      dropped from the proposal and named.
+    """
+
+    mpns: set[str] = field(default_factory=set)
+    quotes: set[str] = field(default_factory=set)
+    staged: list[Proposal] = field(default_factory=list)
+
+    def saw_mpn(self, mpn: str | None) -> None:
+        if mpn and mpn.strip():
+            self.mpns.add(_fold(mpn))
+
+    def saw_quote(self, quote: str) -> None:
+        if quote.strip():
+            self.quotes.add(_fold(quote))
+
+    def knows_mpn(self, mpn: str) -> bool:
+        return _fold(mpn) in self.mpns
+
+    def knows_quote(self, quote: str) -> bool:
+        folded = _fold(quote)
+        return any(folded in known or known in folded for known in self.quotes)
+
+    def take(self) -> list[Proposal]:
+        staged, self.staged = self.staged, []
+        return staged
+
+
+def _fold(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().casefold()
+
+
+@dataclass
 class ResearchContext:
     """Everything the tools are allowed to reach.
 
@@ -184,6 +235,10 @@ class ResearchContext:
     done a lot. Absent means `datasheet_fetch` without `datasheet_extract`:
     the agent can still find and cache a datasheet for a human to open."""
     fetcher: BinaryTransport | None = None
+    ledger: Ledger = field(default_factory=Ledger)
+    """What the session has been told. Not configuration — state."""
+    propose: bool = True
+    """Whether `propose_part` exists. Off for a session that is only reading."""
 
 
 @dataclass(frozen=True)
@@ -191,6 +246,9 @@ class Toolset:
     """The tools built for one research session."""
 
     tools: tuple[Tool, ...]
+    ledger: Ledger = field(default_factory=Ledger)
+    """Shared with the context the tools were built from, so a caller can
+    drain what the session proposed without reaching through a closure."""
 
     def definitions(self) -> list[dict[str, Any]]:
         return [tool.definition() for tool in self.tools]
@@ -262,7 +320,9 @@ def build_toolset(context: ResearchContext) -> Toolset:
         tools.append(_datasheet_fetch(context))
         if context.reader is not None:
             tools.append(_datasheet_extract(context))
-    return Toolset(tuple(tools))
+    if context.propose:
+        tools.append(_propose_part(context))
+    return Toolset(tuple(tools), context.ledger)
 
 
 def _catalog_search(context: ResearchContext) -> Tool:
@@ -273,6 +333,8 @@ def _catalog_search(context: ResearchContext) -> Tool:
             category=category,
             limit=max(1, min(limit, MAX_RESULTS)),
         )
+        for part in found:
+            context.ledger.saw_mpn(part.mpn)
         return {
             "count": len(found),
             "parts": [_part_payload(part) for part in found],
@@ -329,6 +391,8 @@ def _supplier_search(context: ResearchContext) -> Tool:
             applied = [f"{g.name}: {len(g.value_ids)} matching value(s)" for g in resolution.groups]
             unapplied = [f"{name}: {why}" for name, why in resolution.unmapped]
 
+        for hit in hits[:limit]:
+            context.ledger.saw_mpn(hit.mpn)
         return {
             "category": resolved["path"],
             "constraints_applied": applied,
@@ -386,6 +450,7 @@ def _supplier_get_offer(context: ResearchContext) -> Tool:
         offer = adapter.get_offer(supplier_pn)
         if offer is None:
             return {"error": f"{supplier} has no part {supplier_pn!r}"}
+        context.ledger.saw_mpn(offer.mpn)
         return _offer_payload(offer)
 
     return Tool(
@@ -497,6 +562,9 @@ def _datasheet_extract(context: ResearchContext) -> Tool:
             return {"error": f"no cached datasheet {handle!r}; fetch it first"}
 
         result = extract(datasheet, parameters, context.reader)
+        for item in result.parameters:
+            for citation in item.citations:
+                context.ledger.saw_quote(citation.quote)
         return {
             "parameters": [
                 {
@@ -538,6 +606,190 @@ def _datasheet_extract(context: ResearchContext) -> Tool:
                 },
             },
             "required": ["handle", "parameters"],
+            "additionalProperties": False,
+        },
+        run=run,
+    )
+
+
+def _propose_part(context: ResearchContext) -> Tool:
+    ledger = context.ledger
+
+    def run(
+        mpn: str,
+        manufacturer: str,
+        why: str,
+        concerns: list[str],
+        package: str | None = None,
+        category: str | None = None,
+        description: str = "",
+        datasheet_url: str | None = None,
+        rank: int | None = None,
+        parameters: list[dict[str, Any]] | None = None,
+        constraint_checks: list[dict[str, Any]] | None = None,
+        offers: list[dict[str, Any]] | None = None,
+    ) -> Any:
+        # The invented-MPN guard, and the reason this is a klm function rather
+        # than a line in the system prompt. A part number that never came back
+        # from a tool did not come from a supplier.
+        if not ledger.knows_mpn(mpn):
+            return {
+                "error": (
+                    f"{mpn!r} has not appeared in any tool result this session, so it cannot be "
+                    "proposed. Find it with supplier_search or supplier_get_offer first."
+                )
+            }
+        if not [c for c in concerns if c.strip()]:
+            return {
+                "error": (
+                    "every proposal needs at least one concern — a candidate with nothing wrong "
+                    "with it is one that has not been looked at hard enough"
+                )
+            }
+
+        kept: list[CitedParameter] = []
+        notes: list[str] = []
+        for item in parameters or []:
+            quote = str(item.get("quote", "") or "")
+            name = str(item.get("name", "") or "")
+            if not ledger.knows_quote(quote):
+                # It may still be true. It is not something klm read.
+                notes.append(f"{name}: dropped — its quote is not in any datasheet klm read")
+                continue
+            kept.append(
+                CitedParameter(
+                    name=name,
+                    value=str(item.get("value", "") or ""),
+                    page=item.get("page"),
+                    quote=quote,
+                )
+            )
+
+        proposal = Proposal(
+            mpn=mpn.strip(),
+            manufacturer=manufacturer.strip(),
+            why=why,
+            package=package,
+            category=category,
+            description=description,
+            datasheet_url=datasheet_url,
+            rank=rank,
+            parameters=kept,
+            checks=[
+                ConstraintCheck(
+                    name=str(c.get("name", "")),
+                    required=str(c.get("required", "")),
+                    actual=str(c.get("actual", "")),
+                    status=str(c.get("status", "UNKNOWN")).upper(),
+                )
+                for c in constraint_checks or []
+            ],
+            offers=[
+                ProposedOffer(
+                    supplier=str(o.get("supplier", "")),
+                    supplier_pn=str(o.get("supplier_pn", "")),
+                    stock=o.get("stock"),
+                    unit_price=o.get("unit_price"),
+                    currency=o.get("currency"),
+                )
+                for o in offers or []
+            ],
+            concerns=[c for c in concerns if c.strip()],
+            notes=notes,
+        )
+        ledger.staged.append(proposal)
+
+        return {
+            "recorded": True,
+            "queued_for_review": proposal.summary(),
+            "parameters_kept": len(kept),
+            "parameters_dropped": notes,
+            "note": (
+                "Recorded for a human to review. Nothing was written to the catalog, and "
+                "approving it will produce a draft part, not an approved one."
+            ),
+        }
+
+    return Tool(
+        name="propose_part",
+        description=(
+            "Put a candidate in the review queue. This is the only tool that produces anything "
+            "lasting, and it produces a proposal — a human reads it and decides; the catalog is "
+            "not touched. The MPN must be one that appeared in an earlier tool result: klm "
+            "checks, and refuses one it has not seen. A parameter whose quote did not come from "
+            "a datasheet klm read is dropped from the proposal and reported back to you. State "
+            "at least one concern; a candidate with none has not been looked at hard enough."
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "mpn": {"type": "string", "description": "Exactly as a tool returned it."},
+                "manufacturer": {"type": "string"},
+                "why": {
+                    "type": "string",
+                    "description": "Why this candidate, in a sentence or two.",
+                },
+                "concerns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "What is wrong with it, or what a reviewer should check.",
+                },
+                "package": {"type": "string"},
+                "category": {
+                    "type": "string",
+                    "description": "klm taxonomy path, e.g. 'IC/Power/Regulator/Switching'.",
+                },
+                "description": {"type": "string"},
+                "datasheet_url": {"type": "string"},
+                "rank": {"type": "integer", "minimum": 1, "description": "1 is the best."},
+                "parameters": {
+                    "type": "array",
+                    "description": "From datasheet_extract: name, value, page, quote.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "value": {"type": "string"},
+                            "page": {"type": "integer"},
+                            "quote": {"type": "string"},
+                        },
+                        "required": ["name", "value", "quote"],
+                        "additionalProperties": False,
+                    },
+                },
+                "constraint_checks": {
+                    "type": "array",
+                    "description": "One per requirement constraint. FAIL is a valid answer.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {"type": "string"},
+                            "required": {"type": "string"},
+                            "actual": {"type": "string"},
+                            "status": {"type": "string", "enum": ["PASS", "FAIL", "UNKNOWN"]},
+                        },
+                        "required": ["name", "required", "actual", "status"],
+                        "additionalProperties": False,
+                    },
+                },
+                "offers": {
+                    "type": "array",
+                    "description": "From supplier_get_offer. Never from memory.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "supplier": {"type": "string"},
+                            "supplier_pn": {"type": "string"},
+                            "stock": {"type": "integer"},
+                            "unit_price": {"type": "number"},
+                            "currency": {"type": "string"},
+                        },
+                        "required": ["supplier", "supplier_pn"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["mpn", "manufacturer", "why", "concerns"],
             "additionalProperties": False,
         },
         run=run,

@@ -18,6 +18,7 @@
     <button data-view="project">Project</button>
     <button data-view="orders">Ordering</button>
     <button data-view="stock">Inventory</button>
+    <button data-view="review">Review</button>
     <button data-view="health">Health</button>
   </nav>
 </header>
@@ -87,6 +88,19 @@
   <section id="stock" class="view">
     <div class="bar"><input id="location" placeholder="Cabinet A/*"><button id="stock-load">Show</button></div>
     <div id="stock-body"></div>
+  </section>
+
+  <!-- The agent's queue. Nothing here is in the catalog yet: approving runs the
+       phase-3 pipeline and produces a *draft*, which still faces QA and lint. -->
+  <section id="review" class="view">
+    <div class="bar">
+      <button id="review-load">Refresh</button>
+      <label><input type="checkbox" id="review-all"> decided too</label>
+    </div>
+    <div class="split">
+      <div id="review-list"></div>
+      <aside id="review-detail"><p class="muted">Select a proposal.</p></aside>
+    </div>
   </section>
 
   <section id="health" class="view"><div id="health-body"></div></section>

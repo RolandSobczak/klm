@@ -315,6 +315,92 @@ $("stock-load").onclick = async () => {
   } catch (error) { fail("stock-body", error); }
 };
 
+// -- review -----------------------------------------------------------
+// A proposal is a claim with its evidence attached. The screen's job is to put
+// the failing checks and the concerns where they cannot be scrolled past —
+// approving is the one action here that creates anything.
+async function loadReview() {
+  try {
+    const state = $("review-all").checked ? "" : "pending";
+    const queue = await api(`/api/proposals?state=${state}`);
+    show("review-list", queue.length
+      ? el("table", {}, el("tbody", {}, queue.map((p) => el("tr", {
+            onclick: (e) => {
+              document.querySelectorAll("#review-list tr").forEach((r) => r.classList.remove("on"));
+              e.currentTarget.classList.add("on");
+              showProposal(p.id);
+            } },
+          el("td", { class: p.state === "pending" ? "" : "muted" }, p.mpn),
+          el("td", { class: "muted" }, p.manufacturer),
+          el("td", { class: p.state === "rejected" ? "warn" : "muted" }, p.state)))))
+      : el("p", { class: "muted" },
+          "Nothing waiting. `klm research run` is what fills this."));
+  } catch (error) { fail("review-list", error); }
+}
+
+async function showProposal(id) {
+  try {
+    const p = await api(`/api/proposals/${id}`);
+    const failing = (p.checks || []).filter((c) => c.status === "FAIL");
+    show("review-detail",
+      el("h2", {}, `${p.mpn} — ${p.manufacturer}`),
+      p.why ? el("p", {}, p.why) : null,
+      failing.length
+        ? el("p", { class: "warn" },
+            `Fails ${failing.length} constraint(s): ` + failing.map((c) => c.name).join(", "))
+        : null,
+      (p.checks || []).length
+        ? el("table", {}, el("tbody", {}, p.checks.map((c) => el("tr", {},
+            el("td", { class: c.status === "PASS" ? "ok" : "warn" }, c.status),
+            el("td", {}, c.name), el("td", { class: "muted" }, `needs ${c.required}`),
+            el("td", {}, c.actual)))))
+        : null,
+      // Every parameter carries the page and the passage it was quoted from;
+      // one without them never made it this far.
+      (p.parameters || []).length
+        ? el("table", {}, el("tbody", {}, p.parameters.map((x) => el("tr", {},
+            el("td", {}, x.name), el("td", {}, x.value),
+            el("td", { class: "muted" }, x.page ? `p.${x.page}` : ""),
+            el("td", { class: "muted" }, x.quote)))))
+        : null,
+      (p.offers || []).length
+        ? el("table", {}, el("tbody", {}, p.offers.map((o) => el("tr", {},
+            el("td", {}, o.supplier), el("td", {}, o.supplier_pn),
+            el("td", {}, o.unit_price ? `${o.unit_price} ${o.currency || ""}` : "no price"),
+            el("td", { class: "muted" }, o.stock === null ? "stock unknown" : `stock ${o.stock}`)))))
+        : null,
+      ...(p.concerns || []).map((c) => el("p", { class: "warn" }, c)),
+      ...(p.notes || []).map((n) => el("p", { class: "muted" }, `klm: ${n}`)),
+      p.state === "pending"
+        ? el("div", { class: "bar" },
+            el("button", { onclick: () => approveProposal(p.id) }, "Approve → draft part"),
+            el("button", { onclick: () => rejectProposal(p.id) }, "Reject"))
+        : el("p", { class: "muted" },
+            p.klm_id ? `Approved as ${p.klm_id}` : `Rejected: ${p.reason || ""}`));
+  } catch (error) { fail("review-detail", error); }
+}
+
+async function approveProposal(id) {
+  watchJob(await post(`/api/proposals/${id}/approve`), `Approving ${id}`, () => {
+    loadReview();
+    loadParts();
+  });
+}
+
+async function rejectProposal(id) {
+  // The reason is required by the service: a rejection log that says only "no"
+  // is the one thing that cannot improve the prompt.
+  const reason = prompt("Why is this the wrong part?");
+  if (!reason) return;
+  try {
+    await post(`/api/proposals/${id}/reject`, { reason });
+    loadReview();
+  } catch (error) { fail("review-detail", error); }
+}
+
+$("review-load").onclick = loadReview;
+$("review-all").onchange = loadReview;
+
 // -- health -----------------------------------------------------------
 async function loadHealth() {
   try {

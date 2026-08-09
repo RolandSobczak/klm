@@ -634,3 +634,69 @@ def test_the_cli_falls_back_to_serving(monkeypatch, capsys, tmp_path: Path) -> N
     assert cli.main(["app"]) == cli.EXIT_OK
     assert served.get("ran") is True
     assert "falling back to the browser" in capsys.readouterr().out
+
+
+def _proposal(paths):  # type: ignore[no-untyped-def]
+    from klm.services.proposals import CitedParameter, ConstraintCheck, Proposal, save
+    from klm.store import connect
+
+    conn = connect(paths.db, create=False)
+    try:
+        return save(
+            conn,
+            Proposal(
+                mpn="RC0402FR-074K7L",
+                manufacturer="Yageo",
+                package="0402",
+                category="Passive/Resistor",
+                why="cheap and stocked",
+                concerns=["only one supplier"],
+                parameters=[CitedParameter("Tol", "1%", 2, "±1% tolerance")],
+                checks=[ConstraintCheck("value", "4k7", "4.7k", "PASS")],
+            ),
+        ).id
+    finally:
+        conn.close()
+
+
+def test_the_review_queue_is_served(client) -> None:  # type: ignore[no-untyped-def]
+    client, paths, _ = client
+    _proposal(paths)
+
+    queue = client.get("/api/proposals").json()
+
+    assert [p["mpn"] for p in queue] == ["RC0402FR-074K7L"]
+    assert queue[0]["state"] == "pending"
+
+
+def test_a_proposal_carries_its_evidence(client) -> None:  # type: ignore[no-untyped-def]
+    client, paths, _ = client
+    proposal_id = _proposal(paths)
+
+    payload = client.get(f"/api/proposals/{proposal_id}").json()
+
+    assert payload["parameters"][0]["quote"] == "±1% tolerance"
+    assert payload["checks"][0]["status"] == "PASS"
+    assert payload["concerns"] == ["only one supplier"]
+
+
+def test_rejecting_without_a_reason_is_refused(client) -> None:  # type: ignore[no-untyped-def]
+    client, paths, _ = client
+    proposal_id = _proposal(paths)
+
+    response = client.post(f"/api/proposals/{proposal_id}/reject", json={"reason": "  "})
+
+    assert response.status_code == 400
+    assert "needs a reason" in response.json()["detail"]
+
+
+def test_rejecting_records_the_reason(client) -> None:  # type: ignore[no-untyped-def]
+    client, paths, _ = client
+    proposal_id = _proposal(paths)
+
+    payload = client.post(
+        f"/api/proposals/{proposal_id}/reject", json={"reason": "wrong package"}
+    ).json()
+
+    assert payload["state"] == "rejected" and payload["reason"] == "wrong package"
+    assert client.get("/api/proposals").json() == []

@@ -1232,3 +1232,65 @@ def test_datasheet_extract_needs_a_part_with_a_datasheet(home: Path, capsys) -> 
 
     assert code == EXIT_CHECK_FAILED
     assert "no datasheet URL" in capsys.readouterr().out
+
+
+def _queue_one(paths: Paths) -> int:
+    from klm.services.proposals import Proposal, save
+
+    conn = connect(paths.db, create=False)
+    try:
+        stored = save(
+            conn,
+            Proposal(
+                mpn="RC0402FR-074K7L",
+                manufacturer="Yageo",
+                package="0402",
+                category="Passive/Resistor",
+                why="cheap and stocked",
+                concerns=["only one supplier"],
+            ),
+        )
+        return stored.id or 0
+    finally:
+        conn.close()
+
+
+def test_research_review_lists_the_queue(home: Path, capsys) -> None:
+    assert main(["init"]) == EXIT_OK
+    _queue_one(Paths.resolve(None))
+
+    assert main(["research", "review"]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "RC0402FR-074K7L" in out and "Yageo" in out
+
+
+def test_research_review_shows_one_with_its_evidence(home: Path, capsys) -> None:
+    assert main(["init"]) == EXIT_OK
+    proposal_id = _queue_one(Paths.resolve(None))
+
+    assert main(["research", "review", str(proposal_id)]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "cheap and stocked" in out
+    assert "only one supplier" in out, "the concerns are the point of reading it"
+
+
+def test_rejecting_needs_a_reason(home: Path, capsys) -> None:
+    assert main(["init"]) == EXIT_OK
+    proposal_id = _queue_one(Paths.resolve(None))
+
+    assert main(["research", "review", "--reject", str(proposal_id)]) == EXIT_CHECK_FAILED
+    assert "needs --reason" in capsys.readouterr().out
+
+
+def test_approving_makes_a_draft(home: Path, kicad_libs: None, capsys) -> None:
+    assert main(["init"]) == EXIT_OK
+    proposal_id = _queue_one(Paths.resolve(None))
+
+    assert main(["research", "review", "--approve", str(proposal_id)]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "draft" in out
+    assert main(["research", "review"]) == EXIT_OK
+    assert "nothing waiting" in capsys.readouterr().out
