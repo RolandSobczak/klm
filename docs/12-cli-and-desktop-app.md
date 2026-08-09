@@ -18,14 +18,14 @@ The rule: if the GUI can do something the CLI cannot, that is a bug in the CLI.
 klm init                         Set up the catalog, register with KiCad
 klm doctor                       Check external tools, config, KiCad registration
 
-PARTS
-klm part add --lcsc C8734 | --mpn X --mfr Y | --interactive
-klm part show <klm_id|mpn>
-klm part search <query> [--category …] [--in-stock] [--supplier tme]
-klm part edit <klm_id>
-klm part approve <klm_id>
-klm part deprecate <klm_id> [--successor <klm_id>]
-klm part merge <from> <into>
+PARTS                                               ✓ built · ○ not yet
+✓ klm part add --mpn X --mfr Y [--category …] [--package …] [--value …] [--offline]
+✓ klm part show <klm_id|mpn> [--format json]
+✓ klm part approve <klm_id|mpn>
+✓ klm part deprecate <klm_id|mpn>
+○ klm part search <query> [--category …] [--in-stock] [--supplier tme]
+○ klm part edit <klm_id>
+○ klm part merge <from> <into>
 
 ASSETS
 klm assets acquire <klm_id>
@@ -43,6 +43,7 @@ klm assets reuse-check
 CATALOG
 klm lint [--project .] [--fix] [--select …] [--format json]
 klm generate                     Rebuild generated/ from the catalog
+klm render <ID_OR_MPN> [--footprint] [--output FILE]   SVG; no KiCad needed
 klm export | klm import          SQLite ↔ YAML mirror
 klm register [--check]           KiCad lib tables + env vars
 
@@ -57,6 +58,7 @@ klm vendor [--with-3d] [--dry-run] [--name N] [--from-library NICK] [--strict]
            [--allow-unresolved] [--no-timestamp]
 klm unvendor [--dry-run] [--force]
 klm sync status [--exit-code] [--format json]
+klm sync diff <PART> [--side both|catalog|project] [--format text|json]
 klm sync pull [PART …] [--strategy prefer-global] [--dry-run]
 klm sync push [PART …] [--strategy prefer-project] [--dry-run]
 klm sync resolve [--strategy prefer-global|prefer-project]
@@ -69,6 +71,10 @@ klm fab [--variant v] [--profile jlcpcb|generic] [--output DIR]
         [--check] [--no-assembly] [--allow-dirty] [--no-timestamp]
 klm fab feedback <dir> --wrong U3:180 [--confirm-rest] [--generalize]
 klm fab corrections list | set <pattern> <deg> [--source user] | remove <pattern>
+
+DESKTOP APP                                         see docs/adr/0012
+klm app [--port N] [--serve]      native window; falls back to the browser
+klm serve [--port N]              URL only, for SSH and containers
 
 REPOSITORY & CI                                     see doc 15 · all take --project DIR
 klm scaffold [--preset publish|private] [--check] [--update]
@@ -118,50 +124,66 @@ Conventions applied uniformly:
 
 ## 3. The local API
 
-FastAPI over localhost, bound to `127.0.0.1` with a token generated at startup and handed to the
-shell — so a stray browser tab can't drive the user's library.
+FastAPI, bound to `127.0.0.1` and started by the user's own session. **No authentication**: a
+login on a single-user local tool is security theatre, and the thing that would actually be a
+mistake — binding to an address something else can reach — is what the host constant refuses.
+
+Every route is a *translation* of one `klm.services.*` function: read the arguments, call the
+service, shape the result. The moment a route does arithmetic, the GUI and the CLI start
+disagreeing about what klm does; a test asserts the part payload is the service's own object.
 
 ```
-GET    /parts?q=&category=&status=
-GET    /parts/{klm_id}
-POST   /parts                      → draft
-PATCH  /parts/{klm_id}
-POST   /parts/{klm_id}/approve
+GET    /api/health                          tools, catalog, part counts
+GET    /api/parts?q=&status=
+GET    /api/parts/{klm_id}                  + offers, stock
+POST   /api/parts                           → job; the add-part wizard
+POST   /api/parts/{klm_id}/status           approve / deprecate
+GET    /api/parts/{klm_id}/symbol.svg       rendered by klm, not kicad-cli
+GET    /api/parts/{klm_id}/footprint.svg
+GET    /api/lint?select=
 
-GET    /projects
-POST   /projects/{id}/vendor
-GET    /projects/{id}/sync-status
+GET    /api/projects?path=                  mode, BOM, sync status
+GET    /api/projects/diff?path=&klm_id=     both sides, see §4
+GET    /api/projects/verify?path=           clean-room; takes no catalog
+POST   /api/projects/vendor | /unvendor     → job
 
-POST   /jobs/refresh               → job id
-POST   /jobs/acquire-assets
-POST   /jobs/research
-GET    /jobs/{id}                  → status, progress, result
-GET    /jobs/{id}/events           → SSE stream
+POST   /api/orders/plan                     demand → split, with the reasoning
+GET    /api/orders | /api/orders/{id}
+POST   /api/orders/{id}/receive
+GET    /api/stock?location=
+POST   /api/generate                        → job
+
+GET    /api/jobs | /api/jobs/{id}
+GET    /api/jobs/{id}/events                SSE; the backlog is replayed first
 ```
 
-Long operations are jobs with an SSE event stream, because asset acquisition and agent research
-take tens of seconds to minutes and a progress-less UI for that is unusable.
+Long operations are jobs with an SSE event stream, because vendoring, asset acquisition and agent
+research take tens of seconds to minutes and a progress-less UI for that is unusable. A watcher
+that arrives late gets the whole log, and a job's terminal state is assigned *last* — so "state is
+terminal" means "everything is recorded", including the traceback.
 
 ## 4. Desktop app
 
-**Tauri shell + web UI + Python sidecar.** The shell is a thin window around a local web UI that
-talks to the FastAPI process. See [ADR-0005](adr/0005-desktop-shell.md) for the alternatives
-considered (PySide6, Electron, browser-only).
+**pywebview shell + web UI, in one process.** The window wraps the platform's own webview
+(WebView2 / WebKit / WebKitGTK) around the local UI, which talks to the FastAPI app. See
+[ADR-0012](adr/0012-pywebview-shell.md), which supersedes [ADR-0005](adr/0005-desktop-shell.md)
+and records why Tauri was dropped — and [ADR-0005] for the alternatives weighed before either
+(PySide6, Electron, browser-only).
 
 ### Screens
 
-| Screen | Purpose |
-|---|---|
-| **Catalog** | Searchable, filterable part table. Columns configurable; filters on stock, supplier, category, lint status. The screen you live in. |
-| **Part detail** | Everything about one part: fields, parameters with their sources, symbol and footprint previews, 3D preview, offers with price-break table, stock, where it's used. |
-| **Add part** | The acquisition wizard — identify → offers → assets → QA report → review → approve. Each step shows what klm found and lets you correct it. |
-| **Research** | Requirement builder, live agent stream, ranked candidates with constraint checks, approve/edit/reject. |
-| **Projects** | Registered projects, their mode, sync status at a glance. Vendor/sync actions with diff preview. |
-| **Sync detail** | Per-part drift, side-by-side diffs of global vs vendored assets, conflict resolution. |
-| **Order** | Build plan → demand → supplier split, with the reasoning shown per line and the ability to pin lines. Cart export. |
-| **Inventory** | Stock by location, low-stock list, count-entry mode, label printing. |
-| **Fab** | Preflight checklist, package generation, feedback entry after a run. |
-| **Health** | Catalog-wide lint results, stale offers, QA failures, duplicate candidates. |
+| Screen | Built | Purpose |
+|---|---|---|
+| **Catalog** | ✓ | Searchable, filterable part table. Filters on status and free text; columns and stock/supplier filters are not there yet. The screen you live in. |
+| **Part detail** | ✓ | One part: fields, symbol and footprint previews, offers, stock, approve/deprecate. Parameters with their sources and where-used are not there yet. |
+| **Add part** | ✓ | One form, then a job log. The steps the pipeline runs — identify → offers → assets → QA — are things klm *does*, not things it asks about, so the only screen with a question on it is the form. |
+| **Research** | — | Phase 9. Requirement builder, live agent stream, ranked candidates, approve/edit/reject. |
+| **Projects** | ✓ | Open a project: mode, BOM, sync status, vendor, clean-room verify. A registered-project list is not there yet. |
+| **Sync detail** | ✓ | Per-part drift, both sides, as a coloured patch. Conflict *resolution* is still CLI-only. |
+| **Order** | ✓ | Build plan → demand → supplier split, with the reasoning per line. Pinning and cart export are CLI-only. |
+| **Inventory** | ✓ | Stock by location. Count-entry mode and label printing are CLI-only. |
+| **Fab** | — | Preflight checklist, package generation, feedback entry after a run. |
+| **Health** | ✓ | External tools and what their absence disables, catalog counts. Stale offers, QA failures and duplicate candidates are not there yet. |
 
 ### Design principles
 
@@ -176,25 +198,70 @@ considered (PySide6, Electron, browser-only).
 
 ### Previews
 
-Symbol, footprint and 3D previews are genuinely useful for review and non-trivial to build:
+- **Symbol and footprint** — built, in `klm.kicad.render`. The S-expression is rendered to SVG
+  directly rather than through `kicad-cli`, for the same reason `klm bom` reads `.kicad_sch`
+  itself: a capability that needs an external tool is a capability that disappears, and the
+  machine with no KiCad is exactly the one reviewing a part it has never seen. Reachable from the
+  CLI as `klm render` and from the API as `/api/parts/{id}/symbol.svg`.
 
-- **Symbol and footprint**: render the S-expression to SVG directly. klm already parses these
-  fully; a 2D renderer for the subset that appears in symbols and footprints is a contained
-  amount of work and avoids depending on KiCad being installed for a preview.
-- **3D**: render the STEP via a small three.js viewer after conversion to a web-friendly mesh.
-  Lower priority — the QA gate's bounding-box check catches most real problems without a picture.
+  It is a **preview, not a plot**: it draws the geometry that carries meaning — outlines, pads,
+  pins — and not KiCad's full graphical vocabulary. A pad in the wrong place is visible here; a
+  label two millimetres off is not a defect this drawing exists to find. Unknown shapes are
+  skipped rather than approximated, so a future KiCad primitive reads as "something is missing"
+  instead of "this is what you get". The QA gate remains the thing that *checks*.
+
+- **3D** — not built. A STEP file is a boundary representation, so a picture means tessellating
+  it, and a wrong picture of a 3D model is the failure this project refuses everywhere else. The
+  QA gate's bounding-box check catches the real problems without one; KiCad's own 3D viewer is
+  there for the rest.
+
+### The sync diff, and the comparison it refuses to make
+
+The obvious screen — the catalog's asset beside the vendored one — is the wrong screen. The
+vendored symbol was renamed and re-fielded on the way in and its footprint points inside the
+project, so the two differ permanently and by design (docs/06 §5). A diff of them never empties,
+and a diff that never empties teaches its reader to ignore it.
+
+`klm sync diff` shows **two comparisons, each against its own recorded state**: what moved in the
+catalog since this project vendored it, and what moved in this project since klm wrote it. That
+is the same pair `sync status` decides `clean` / `global-ahead` / `project-ahead` / `conflict`
+from, spelled out to the line.
+
+The catalog side is easy — the store is content-addressed, so the asset as-recorded is still
+there. The project side is not: klm keeps the vendored copy's *hash*, never its bytes. So the
+"before" is rebuilt through `build_library`, the same function that wrote it, from the catalog
+assets the lock recorded — and then checked against the recorded hash. If the rebuild does not
+reproduce that hash it is a guess, and it is reported as unavailable rather than shown. A guessed
+diff invites someone to resolve a conflict that is not there.
 
 ## 5. Packaging
 
-| Target | Approach |
-|---|---|
-| Linux | AppImage or a `.deb`; also `pipx install klm` for the CLI alone |
-| Windows | Tauri MSI bundling the Python sidecar |
-| macOS | Not targeted initially |
+| Target | Artifact | Notes |
+|---|---|---|
+| Windows | `klm-setup-<v>.exe` | Inno Setup wizard, per-user, no UAC. Installs the app *and* the CLI |
+| macOS | `klm-<v>-macos.zip` | A `.app` bundle; the CLI is inside it |
+| Linux | `klm-<v>-linux-x86_64.tar.gz` | Glibc-bound; `pip` is the better route on Linux |
+| Any | wheel / sdist | `pip install 'klm[app]'`, or `pipx install klm` for the CLI alone |
+| Linux window | — | Needs WebKitGTK. Absent, `klm app` degrades to `klm serve` and says why |
 
-External tools (`kicad-cli`, `freecadcmd`) are **not** bundled — they're large and already
-installed by anyone who needs them. `klm doctor` reports what's missing and what each missing
-tool disables:
+Downloadable builds exist because "install Python, then `pip install`" is not an
+installation instruction for the person this tool is for. ADR-0012 dropped Tauri
+and with it the MSI ADR-0005 had assumed; PyInstaller replaces it, one job per
+platform because **PyInstaller does not cross-compile**. Every artifact carries
+the CLI as well as the window — shipping only the window would make "if the GUI
+can do something the CLI cannot, that is a bug in the CLI" unenforceable for
+anyone who installed the easy way.
+
+Three consequences worth stating plainly, all in `packaging/README.md`: nothing
+is **code-signed**, so Windows shows a SmartScreen warning and macOS Gatekeeper
+refuses the bundle until certificates are bought; the native Windows window
+needs Microsoft's **WebView2 runtime**, which the installer offers to fetch but
+never requires; and the smoke test in CI tolerates `klm doctor` exiting 1,
+because a runner has no KiCad and 1 is what "a check failed" means.
+
+External tools (`kicad-cli`, `freecadcmd`) are **not** bundled in any of them — they're large and
+already installed by anyone who needs them. `klm doctor` reports what's missing and what each
+missing tool disables:
 
 ```
 $ klm doctor

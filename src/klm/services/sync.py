@@ -27,14 +27,15 @@ possible, and pretending otherwise would be worse than refusing.
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from difflib import unified_diff
 from enum import StrEnum
 
 from klm import ids
 from klm.assets.qa import QaReport
 from klm.kicad import symbols as sym
 from klm.kicad.project import KiCadProject
-from klm.kicad.sexpr import SExp, dumps_canonical
+from klm.kicad.sexpr import SExp, SExprError, dumps_canonical, loads
 from klm.model import Part, PartStatus
 from klm.services.assets import AssetOrigin, register_asset, run_qa
 from klm.services.catalog import get_part, list_parts, save_part
@@ -54,16 +55,19 @@ from klm.services.vendor import (
     project_layout,
     read_vendored,
 )
-from klm.store.assets import AssetKind, AssetStore, hash_bytes
+from klm.store.assets import AssetError, AssetKind, AssetStore, hash_bytes
 
 __all__ = [
     "AdoptReport",
+    "AssetDiff",
+    "PartDiff",
     "PromoteReport",
     "SyncReport",
     "SyncRow",
     "SyncState",
     "SyncStatus",
     "adopt",
+    "diff_part",
     "promote",
     "pull",
     "push",
@@ -490,6 +494,245 @@ def _push_one(
 
     part.updated_at = None
     save_part(conn, part)
+
+
+# ---------------------------------------------------------------------------
+# diff
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AssetDiff:
+    """One asset's drift, on one side, as text a human can read.
+
+    ``side`` is ``catalog`` or ``project``, and the pairing is always *recorded
+    versus current on that same side*. Diffing the catalog asset against the
+    vendored one would be the obvious thing to show and would be noise: the
+    vendored symbol was renamed and re-fielded on the way in and its footprint
+    points inside the project, so the two differ permanently and by design.
+    Only each side against its own recorded state means anything.
+    """
+
+    kind: AssetKind
+    side: str
+    name: str
+    changed: bool
+    before: str = ""
+    after: str = ""
+    unified: str = ""
+    note: str = ""
+    """Why there is no text, when there is none. Never left to be inferred."""
+
+
+@dataclass
+class PartDiff:
+    row: SyncRow
+    diffs: list[AssetDiff] = field(default_factory=list)
+
+    @property
+    def changed(self) -> list[AssetDiff]:
+        return [d for d in self.diffs if d.changed]
+
+
+def diff_part(
+    conn: sqlite3.Connection, store: AssetStore, project: KiCadProject, klm_id: str
+) -> PartDiff:
+    """Show what moved under one vendored part, on each side separately.
+
+    Reads only. This is what `sync status` reports, spelled out to the line.
+    """
+    lock = read_lock(project.lock_file)
+    entry = lock.by_id(klm_id)
+    if entry is None:
+        raise VendorError(f"{klm_id} is not in {project.lock_file.name}")
+
+    status = sync_status(conn, project)
+    row = next(
+        (r for r in status.rows if r.klm_id == klm_id),
+        SyncRow(klm_id=klm_id, mpn=entry.mpn, symbol_name=entry.symbol_name,
+                state=SyncState.CLEAN),
+    )
+    result = PartDiff(row=row)
+
+    part = get_part(conn, klm_id)
+    if part is None:
+        result.diffs.append(
+            AssetDiff(
+                kind=AssetKind.SYMBOL, side="catalog", name=entry.symbol_name or "",
+                changed=True, note="no catalog part carries this KLM_ID — `klm promote` adds one",
+            )
+        )
+        return result
+
+    for kind, name, recorded, current in (
+        (AssetKind.SYMBOL, entry.symbol_name, entry.global_symbol_hash, part.symbol_hash),
+        (
+            AssetKind.FOOTPRINT,
+            entry.footprint_name,
+            entry.global_footprint_hash,
+            part.footprint_hash,
+        ),
+        (AssetKind.MODEL3D, entry.model_name, entry.global_model3d_hash, part.model3d_hash),
+    ):
+        if not name or recorded is None:
+            continue
+        result.diffs.append(_catalog_diff(store, kind, name, recorded, current))
+
+    result.diffs.extend(_project_diffs(store, project, lock, entry, part))
+    return result
+
+
+def _catalog_diff(
+    store: AssetStore, kind: AssetKind, name: str, recorded: str, current: str | None
+) -> AssetDiff:
+    changed = recorded != current
+    if kind is AssetKind.MODEL3D:
+        return AssetDiff(
+            kind=kind, side="catalog", name=name, changed=changed,
+            note="STEP is binary — compared by content hash, not shown",
+        )
+    if current is None:
+        return AssetDiff(
+            kind=kind, side="catalog", name=name, changed=True,
+            note=f"the catalog part no longer has a {kind.value}",
+        )
+    before, after = _asset_text(store, recorded, kind), _asset_text(store, current, kind)
+    return _text_diff(kind, "catalog", name, before, after, changed)
+
+
+def _project_diffs(
+    store: AssetStore,
+    project: KiCadProject,
+    lock: LockFile,
+    entry: LockEntry,
+    part: Part,
+) -> list[AssetDiff]:
+    """What the project's own copy looks like against the copy klm wrote.
+
+    The bytes klm wrote are not kept anywhere — only their hash is — so they are
+    *rebuilt* through the same builder that produced them, from the catalog
+    assets the lock recorded. The rebuild is then checked against the recorded
+    hash, and presented as the "before" only if it matches. A reconstruction
+    that does not reproduce the hash is a guess, and a guess shown as a diff is
+    worse than no diff, because it invites someone to resolve a conflict that
+    isn't there.
+    """
+    library = read_vendored(project, lock.library_name)
+    snapshot = replace(
+        part,
+        symbol_hash=entry.global_symbol_hash,
+        footprint_hash=entry.global_footprint_hash,
+        model3d_hash=entry.global_model3d_hash,
+    )
+    layout = project_layout(project, lock.library_name, include_3d=lock.include_3d)
+    rebuilt = build_library([snapshot], store, layout, _lock_names(lock)).by_id(part.klm_id)
+
+    out: list[AssetDiff] = []
+    for kind, name, recorded, current, before_bytes, after_text in (
+        (
+            AssetKind.SYMBOL,
+            entry.symbol_name,
+            entry.vendored_symbol_hash,
+            library.symbol_hash(entry.symbol_name),
+            rebuilt.symbol_bytes() if rebuilt else None,
+            _symbol_text(library, entry.symbol_name),
+        ),
+        (
+            AssetKind.FOOTPRINT,
+            entry.footprint_name,
+            entry.vendored_footprint_hash,
+            library.footprint_hash(entry.footprint_name),
+            rebuilt.footprint_bytes() if rebuilt else None,
+            _footprint_text(library, entry.footprint_name),
+        ),
+    ):
+        if not name or recorded is None:
+            continue
+        changed = recorded != current
+        if after_text is None:
+            out.append(
+                AssetDiff(
+                    kind=kind, side="project", name=name, changed=True,
+                    note=f"{name!r} is no longer in the vendored library",
+                )
+            )
+            continue
+        if before_bytes is None or hash_bytes(before_bytes, kind) != recorded:
+            out.append(
+                AssetDiff(
+                    kind=kind, side="project", name=name, changed=changed, after=after_text,
+                    note="the copy klm wrote could not be reconstructed from the lock — "
+                    "showing the current file only",
+                )
+            )
+            continue
+        out.append(
+            _text_diff(kind, "project", name, before_bytes.decode("utf-8"), after_text, changed)
+        )
+
+    if entry.model_name and entry.vendored_model3d_hash is not None:
+        out.append(
+            AssetDiff(
+                kind=AssetKind.MODEL3D, side="project", name=entry.model_name,
+                changed=entry.vendored_model3d_hash != library.model_hash(entry.model_name),
+                note="STEP is binary — compared by content hash, not shown",
+            )
+        )
+    return out
+
+
+def _text_diff(
+    kind: AssetKind, side: str, name: str, before: str, after: str, changed: bool
+) -> AssetDiff:
+    return AssetDiff(
+        kind=kind,
+        side=side,
+        name=name,
+        changed=changed,
+        before=before,
+        after=after,
+        unified="".join(
+            unified_diff(
+                before.splitlines(keepends=True),
+                after.splitlines(keepends=True),
+                fromfile=f"{name} (as vendored)" if side == "project" else f"{name} (recorded)",
+                tofile=f"{name} (now)",
+            )
+        ),
+    )
+
+
+def _asset_text(store: AssetStore, content_hash: str, kind: AssetKind) -> str:
+    """The asset's canonical text, or a line saying why there is none.
+
+    Canonical rather than stored bytes so the diff shows what the *hash* saw:
+    a reformat that changed no content leaves the hash alone, and a diff full of
+    whitespace beside a "nothing changed" verdict is the kind of contradiction
+    that makes people stop trusting the tool.
+    """
+    try:
+        raw = store.read_text(content_hash, kind)
+    except AssetError:
+        return f"# {content_hash} is no longer in the asset store\n"
+    try:
+        return dumps_canonical(loads(raw))
+    except SExprError:
+        return raw
+
+
+def _symbol_text(library: VendoredLibrary, name: str | None) -> str | None:
+    if not name or name not in library.symbols:
+        return None
+    return dumps_canonical(library.symbols[name])
+
+
+def _footprint_text(library: VendoredLibrary, name: str | None) -> str | None:
+    if not name or name not in library.footprints:
+        return None
+    try:
+        return dumps_canonical(loads(library.footprints[name].decode("utf-8")))
+    except (SExprError, UnicodeDecodeError):  # pragma: no cover - a corrupt file
+        return library.footprints[name].decode("utf-8", errors="replace")
 
 
 # ---------------------------------------------------------------------------

@@ -120,6 +120,7 @@ Global → project. Makes a linked project self-contained.
 6. Rewrite footprint (model …) paths → ${KIPRJMOD}/libraries/packages3d/<file>.step
 7. Rewrite .kicad_sch lib_id:  KLM:X → <name>:X
    Rewrite .kicad_sch Footprint field: KLM:Y → <name>:Y
+   Stamp KLM_ID onto each placed symbol   ← see below
    Rewrite .kicad_pcb footprint refs:  KLM:Y → <name>:Y
 8. Write project sym-lib-table and fp-lib-table (${KIPRJMOD}-relative).
 9. Write klm.lock.json.
@@ -129,6 +130,13 @@ Global → project. Makes a linked project self-contained.
 Steps 7–8 are where the lossless round-trip rule ([03 §3](03-architecture.md#3-the-lossless-round-trip-rule))
 earns its keep. Only `lib_id` nodes, the `Footprint` field value, and `(model …)` paths are
 touched; every other node in the schematic and board is re-serialized byte-identically.
+
+**Step 7 stamps `KLM_ID` onto the schematic instances**, which is not cosmetic. A board built with
+klm gets the field for free — KiCad copies a library symbol's fields onto an instance when it is
+placed. A board that *predates* klm does not, and vendoring alone does not fix it, so every feature
+that identifies a part by `KLM_ID` — the BOM, ordering, cost reporting — finds nothing on exactly
+the projects a user already has. Vendoring already resolved the identity to rewrite the `lib_id`;
+writing it down costs nothing and is the difference between those boards working and not.
 
 Everything is written to a staging directory and moved into place atomically, so an interrupted
 vendor leaves the project untouched.
@@ -211,6 +219,49 @@ $ klm sync status
 ```
 
 `--exit-code` makes it CI-usable: non-zero when anything is not `clean`.
+
+### `klm sync diff`
+
+`status` says *that* something moved; `diff` says what. It prints the same pair of comparisons the
+table above is built from — **each side against its own recorded state**, never one against the
+other:
+
+```
+$ klm sync diff USB-C-16P
+USB-C-16P  [conflict]
+  catalog: symbol; project: footprint
+
+~ catalog: symbol USB-C-16P
+--- USB-C-16P (recorded)
++++ USB-C-16P (now)
+@@ …
+✓ catalog: footprint USB_C_Receptacle_16P — unchanged
+✓ project: symbol USB-C-16P — unchanged
+~ project: footprint USB_C_Receptacle_16P
+--- USB_C_Receptacle_16P (as vendored)
++++ USB_C_Receptacle_16P (now)
+@@ …
+```
+
+**The catalog asset and the vendored one are never diffed against each other**, however natural
+that screen sounds. §5 is why: the vendored symbol was renamed and re-fielded on the way in and
+its footprint points inside the project, so those two differ permanently and by design. A diff
+that never empties is one its reader learns to skip.
+
+The catalog side comes straight out of the content-addressed store — the recorded asset is still
+there, because assets are immutable. The project side is harder: klm records the vendored copy's
+*hash*, never its bytes. So the "before" is rebuilt through `build_library` — the same function
+that wrote it — from the catalog assets the lock recorded, and then checked against the recorded
+hash. **If the rebuild does not reproduce that hash, it is reported as unavailable rather than
+shown.** It happens for real: correct an MPN and the symbol's fields change, so the copy as
+vendored is no longer reconstructible. A "before" assembled from today's fields would look right
+and invite someone to resolve a conflict that is not there.
+
+Both sides are canonicalised before diffing, so the text shows what the *hash* saw. Without that,
+a reformat that changed no content would print a screen of whitespace next to a verdict of
+"unchanged" — the kind of contradiction that costs a tool its credibility.
+
+A 3D model is compared by hash and not shown: STEP is binary, and a diff of it would be noise.
 
 ### `klm sync pull`
 

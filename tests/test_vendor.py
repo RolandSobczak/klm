@@ -602,3 +602,40 @@ def test_the_lock_is_sorted_so_merge_conflicts_are_per_part() -> None:
     rendered = render_lock(lock)
     assert rendered.index('"01"') < rendered.index('"02"')
     assert rendered.endswith("\n")
+
+
+def test_vendoring_stamps_the_identity_onto_the_schematic(env) -> None:
+    """A project that predates klm carries no KLM_ID on its placed symbols.
+
+    KiCad copies a library symbol's fields onto an instance when it is placed,
+    so a board built with klm gets this free. An adopted one does not — and
+    without it the BOM, ordering and cost all key on a field that is not there
+    and see an empty board.
+    """
+    paths, conn, store = env
+    seed_resistor(store, conn)
+    root = make_project(paths.home.parent / "proj", sheet=schematic(klm_id=None))
+    project = find_project(root)
+    assert "KLM_ID" not in (project.root / "my-board.kicad_sch").read_text(encoding="utf-8")
+
+    vendor(conn, store, project)
+
+    text = (project.root / "my-board.kicad_sch").read_text(encoding="utf-8")
+    assert RESISTOR_ID in text
+    instances = sch.iter_symbol_instances(loads(text))
+    assert [i.klm_id for i in instances] == [RESISTOR_ID]
+    # Written the way KiCad writes one, not jammed against its neighbours.
+    assert '(property "KLM_ID" ' in text
+
+
+def test_stamping_is_idempotent(env) -> None:
+    paths, conn, store = env
+    seed_resistor(store, conn)
+    project = find_project(
+        make_project(paths.home.parent / "proj", sheet=schematic(klm_id=None))
+    )
+    vendor(conn, store, project)
+    first = (project.root / "my-board.kicad_sch").read_bytes()
+
+    vendor(conn, store, project)
+    assert (project.root / "my-board.kicad_sch").read_bytes() == first

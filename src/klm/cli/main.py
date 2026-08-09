@@ -45,6 +45,7 @@ from klm.services.generate import generate
 from klm.services.importer import import_symbol_library
 from klm.services.labels import labels_for_parts, render_png, resolve_short_id, write_pdf
 from klm.services.lint import RULES, LintReport, Selector, Severity, lint_catalog
+from klm.services.lockfile import read_lock
 from klm.services.offers import (
     TIMESTAMP_FORMAT,
     delete_offer,
@@ -66,10 +67,12 @@ from klm.services.orders import (
     receive,
 )
 from klm.services.part_add import add_part
+from klm.services.preview import PreviewError, render_part
 from klm.services.register import apply_plan, plan_registration
 from klm.services.scaffold import KICAD_IMAGE, apply_scaffold, plan_scaffold
 from klm.services.split import Assignment, split_order
 from klm.services.stock import (
+    StockItem,
     adjust,
     consume,
     list_stock,
@@ -83,6 +86,7 @@ from klm.services.sync import (
     SyncState,
     SyncStatus,
     adopt,
+    diff_part,
     promote,
     pull,
     push,
@@ -255,6 +259,21 @@ def build_parser() -> argparse.ArgumentParser:
     gen = sub.add_parser("generate", help="Rebuild the KiCad libraries from the catalog.")
     gen.set_defaults(func=cmd_generate)
 
+    render = sub.add_parser("render", help="Draw a part's symbol or footprint as SVG.")
+    render.add_argument("part", metavar="PART", help="KLM_ID or MPN.")
+    render.add_argument(
+        "--footprint",
+        dest="kind",
+        action="store_const",
+        const="footprint",
+        default="symbol",
+        help="Draw the footprint instead of the symbol.",
+    )
+    render.add_argument(
+        "--output", "-o", metavar="FILE", help="Write here instead of standard output."
+    )
+    render.set_defaults(func=cmd_render)
+
     reg = sub.add_parser("register", help="Register klm's libraries with KiCad.")
     reg.add_argument(
         "--check",
@@ -277,6 +296,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_fab_parsers(sub)
     _add_repo_parsers(sub)
     _add_ordering_parsers(sub)
+
+    app = sub.add_parser("app", help="Open klm in a desktop window.")
+    app.add_argument("--port", type=int, help="Localhost port (default: a free one).")
+    app.add_argument(
+        "--serve",
+        action="store_true",
+        help="Print a URL and stay in the terminal instead of opening a window.",
+    )
+    app.set_defaults(func=cmd_app)
+
+    serve = sub.add_parser("serve", help="Serve the UI on localhost without a window.")
+    serve.add_argument("--port", type=int)
+    serve.set_defaults(func=cmd_serve)
 
     return parser
 
@@ -545,6 +577,18 @@ def _add_sync_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) 
     )
     status.add_argument("--format", choices=("text", "json"), default="text")
     status.set_defaults(func=cmd_sync_status)
+
+    diff_cmd = actions.add_parser("diff", help="Show what moved under one vendored part.")
+    _project_argument(diff_cmd)
+    diff_cmd.add_argument("part", metavar="PART", help="MPN, symbol name or KLM_ID.")
+    diff_cmd.add_argument(
+        "--side",
+        choices=("both", "catalog", "project"),
+        default="both",
+        help="Which side's drift to print.",
+    )
+    diff_cmd.add_argument("--format", choices=("text", "json"), default="text")
+    diff_cmd.set_defaults(func=cmd_sync_diff)
 
     pull_cmd = actions.add_parser("pull", help="Bring catalog changes into the project.")
     _project_argument(pull_cmd)
@@ -1252,6 +1296,21 @@ def _add_part_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -
     )
     add.set_defaults(func=cmd_part_add)
 
+    # The GUI could approve and deprecate and the CLI could not, which by this
+    # project's own rule is a bug in the CLI rather than a feature of the GUI.
+    approve = actions.add_parser("approve", help="Mark a part usable in a design.")
+    approve.add_argument("part", metavar="ID_OR_MPN")
+    approve.set_defaults(func=cmd_part_approve, status=PartStatus.APPROVED)
+
+    deprecate = actions.add_parser("deprecate", help="Retire a part without deleting it.")
+    deprecate.add_argument("part", metavar="ID_OR_MPN")
+    deprecate.set_defaults(func=cmd_part_approve, status=PartStatus.DEPRECATED)
+
+    show = actions.add_parser("show", help="Print one part, its offers and its stock.")
+    show.add_argument("part", metavar="ID_OR_MPN")
+    show.add_argument("--format", choices=("text", "json"), default="text")
+    show.set_defaults(func=cmd_part_show)
+
 
 def _add_assets_parser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
     assets = sub.add_parser("assets", help="Acquire, check and convert a part's files.")
@@ -1361,6 +1420,100 @@ def cmd_part_add(args: argparse.Namespace) -> int:
     print()
     print("Next: klm lint --select S,V,A --fix --dry-run, then approve it")
     return EXIT_OK if report.ok else EXIT_CHECK_FAILED
+
+
+def cmd_part_approve(args: argparse.Namespace) -> int:
+    """`klm part approve` / `klm part deprecate` — the status write.
+
+    Deliberately does not check lint first. Approval is a human's judgement and
+    a linter's opinion is advice; making the command refuse would mean the only
+    way to approve a part klm mis-reads is to edit the database by hand.
+    """
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        part = _resolve_part(conn, args.part)
+        if part.status is args.status:
+            print(f"{_INFO} {part.mpn} is already {args.status}")
+            return EXIT_OK
+        was, part.status = part.status, args.status
+        part.updated_at = None
+        save_part(conn, part)
+    finally:
+        conn.close()
+
+    print(f"{_OK} {part.mpn}  {was} → {args.status}")
+    if args.status is PartStatus.DEPRECATED and part.symbol_hash is not None:
+        # S005: a deprecated part is not generated, so anything still using it
+        # keeps working from its vendored copy and nothing new can pick it up.
+        print(f"  {_INFO} it will stop being generated; `klm generate` to apply")
+    return EXIT_OK
+
+
+def cmd_part_show(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        part = _resolve_part(conn, args.part)
+        offers = list_offers(conn, klm_id=part.klm_id)
+        locations = where(conn, part.klm_id)
+    finally:
+        conn.close()
+
+    if args.format == "json":
+        print(json.dumps(_part_payload(part, offers, locations), indent=2))
+        return EXIT_OK
+
+    print(f"{part.mpn}  ({part.manufacturer or 'manufacturer unknown'})")
+    print(f"  {part.description or 'no description'}")
+    for label, value in (
+        ("klm_id", part.klm_id),
+        ("category", part.category or "—"),
+        ("package", part.package or "—"),
+        ("status", str(part.status)),
+        ("lifecycle", str(part.lifecycle)),
+        ("datasheet", part.datasheet_url or "—"),
+    ):
+        print(f"  {label:<12} {value}")
+
+    print(f"\n  offers ({len(offers)})")
+    for offer in offers:
+        stock = "stock unknown" if offer.stock is None else f"{offer.stock} in stock"
+        print(f"    {offer.supplier:<6} {offer.supplier_pn:<18} {stock}")
+    if not offers:
+        print("    none — `klm refresh` fetches them")
+
+    print(f"\n  stock ({sum(item.quantity for item in locations)})")
+    for item in locations:
+        print(f"    {item.quantity:>7}  {item.location}")
+    if not locations:
+        print("    not recorded anywhere")
+    return EXIT_OK
+
+
+def _part_payload(part: Part, offers: list[Offer], locations: list[StockItem]) -> dict[str, object]:
+    """The JSON shape of `klm part show`, matching the API's part payload."""
+    return {
+        "klm_id": part.klm_id,
+        "mpn": part.mpn,
+        "manufacturer": part.manufacturer,
+        "description": part.description,
+        "category": part.category,
+        "package": part.package,
+        "status": str(part.status),
+        "lifecycle": str(part.lifecycle),
+        "datasheet_url": part.datasheet_url,
+        "symbol_hash": part.symbol_hash,
+        "footprint_hash": part.footprint_hash,
+        "model3d_hash": part.model3d_hash,
+        "offers": [
+            {"supplier": o.supplier, "supplier_pn": o.supplier_pn, "stock": o.stock}
+            for o in offers
+        ],
+        "stock": [{"location": s.location, "quantity": s.quantity} for s in locations],
+    }
 
 
 def cmd_assets_acquire(args: argparse.Namespace) -> int:
@@ -1773,6 +1926,102 @@ def cmd_sync_status(args: argparse.Namespace) -> int:
             print(f"\n{_OK} in step with the catalog")
 
     return EXIT_CHECK_FAILED if (args.exit_code and status.attention) else EXIT_OK
+
+
+def cmd_sync_diff(args: argparse.Namespace) -> int:
+    paths, project = _open_project(args)
+    _require_vendored(project)
+    conn = connect(paths.db, create=False)
+    try:
+        klm_id = _resolve_vendored(conn, project, args.part)
+        result = diff_part(conn, AssetStore(paths.assets), project, klm_id)
+    finally:
+        conn.close()
+
+    if args.format == "json":
+        print(
+            json.dumps(
+                {
+                    "klm_id": result.row.klm_id,
+                    "mpn": result.row.mpn,
+                    "state": str(result.row.state),
+                    "assets": [
+                        {
+                            "kind": str(d.kind),
+                            "side": d.side,
+                            "name": d.name,
+                            "changed": d.changed,
+                            "note": d.note,
+                            "unified": d.unified,
+                        }
+                        for d in result.diffs
+                        if args.side in ("both", d.side)
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return EXIT_OK
+
+    print(f"{result.row.mpn or result.row.klm_id}  [{result.row.state}]")
+    if result.row.detail:
+        print(f"  {result.row.detail}")
+    shown = [d for d in result.diffs if args.side in ("both", d.side)]
+    for entry in shown:
+        head = f"\n{'~' if entry.changed else _OK} {entry.side}: {entry.kind} {entry.name}"
+        print(head if entry.changed else f"{head} — unchanged")
+        if entry.note:
+            print(f"  {_INFO} {entry.note}")
+        if entry.changed and entry.unified:
+            print(entry.unified.rstrip("\n"))
+    if not shown:
+        print(f"  {_INFO} nothing recorded to compare against")
+    return EXIT_OK
+
+
+def _resolve_vendored(conn: sqlite3.Connection, project: KiCadProject, reference: str) -> str:
+    """A KLM_ID from whatever the user typed — an id, an MPN or a symbol name.
+
+    Falls back to the lock file rather than only the catalog, because the part
+    a user most wants to diff is often the orphan the catalog has never heard
+    of, and "no such part" would be the least useful possible answer.
+    """
+    lock = read_lock(project.lock_file)
+    if lock.by_id(reference) is not None:
+        return reference
+    by_symbol = lock.by_symbol(reference)
+    if by_symbol is not None:
+        return by_symbol.klm_id
+    matches = {e.klm_id for e in lock.entries if e.mpn.lower() == reference.lower()}
+    if len(matches) == 1:
+        return matches.pop()
+    if len(matches) > 1:
+        raise LookupError(f"{reference!r} matches several vendored parts: {', '.join(matches)}")
+    return _resolve_part(conn, reference).klm_id
+
+
+def cmd_render(args: argparse.Namespace) -> int:
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        part = _resolve_part(conn, args.part)
+    finally:
+        conn.close()
+
+    kind = AssetKind.FOOTPRINT if args.kind == "footprint" else AssetKind.SYMBOL
+    try:
+        svg = render_part(AssetStore(paths.assets), part, kind)
+    except PreviewError as exc:
+        print(f"{_FAIL} {exc}", file=sys.stderr)
+        return EXIT_CHECK_FAILED
+
+    if args.output:
+        Path(args.output).write_text(svg, encoding="utf-8")
+        print(f"{_OK} {args.output}")
+    else:
+        print(svg)
+    return EXIT_OK
 
 
 def cmd_sync_pull(args: argparse.Namespace) -> int:
@@ -2616,6 +2865,39 @@ def cmd_labels_scan(args: argparse.Namespace) -> int:
     finally:
         conn.close()
     return EXIT_OK if len(matches) == 1 else EXIT_CHECK_FAILED
+
+
+# ---------------------------------------------------------------------------
+# app / serve
+# ---------------------------------------------------------------------------
+
+
+def cmd_app(args: argparse.Namespace) -> int:
+    """Open the window, or explain why it could not and serve instead."""
+    from klm.api.desktop import WindowUnavailable, run_server, run_window
+
+    paths = Paths.resolve(args.catalog)
+    if not paths.exists():
+        print(f"{_WARN} no catalog at {paths.home} — run `klm init` first")
+    if args.serve:
+        run_server(args.catalog, port=args.port)
+        return EXIT_OK
+    try:
+        run_window(args.catalog, port=args.port)
+    except WindowUnavailable as exc:
+        # A missing webview is a degradation, not a failure: the same UI is one
+        # command away, and saying so beats a traceback (docs/adr/0012).
+        print(f"{_WARN} {exc}")
+        print(f"{_INFO} falling back to the browser")
+        run_server(args.catalog, port=args.port)
+    return EXIT_OK
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    from klm.api.desktop import run_server
+
+    run_server(args.catalog, port=args.port)
+    return EXIT_OK
 
 
 if __name__ == "__main__":  # pragma: no cover

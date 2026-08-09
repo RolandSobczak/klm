@@ -1,6 +1,6 @@
 # ADR-0005 — Python core + local HTTP API + Tauri shell
 
-**Status:** accepted · **Phase:** 8 · **Related:** [12](../12-cli-and-desktop-app.md)
+**Status:** superseded by [ADR-0012](0012-pywebview-shell.md) · **Phase:** 8 · **Related:** [12](../12-cli-and-desktop-app.md)
 
 ## Context
 

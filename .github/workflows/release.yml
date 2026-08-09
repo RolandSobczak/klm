@@ -1,0 +1,245 @@
+# Builds a downloadable klm for every platform and puts it on GitHub.
+#
+# Artifacts appear on **every run**, so a branch can be downloaded and tried
+# before it is tagged. On a tag they are also attached to the release, which is
+# the link a user is actually given.
+#
+# One job per platform rather than one job with three branches: PyInstaller does
+# not cross-compile — what it produces is that interpreter's own binaries plus a
+# bootloader — so each artifact has to be built on the OS it runs on. That is
+# also why this cannot be done from a developer's machine, and why "I'll build a
+# release when I need one" turns into shipping a different klm than was tested.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to stamp (defaults to the package version)"
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.pick.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: pick
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            v="${{ github.event.inputs.version }}"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="$(grep -oP '__version__ = "\K[^"]+' src/klm/__init__.py)"
+          fi
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+          echo "building klm $v"
+
+  build:
+    needs: version
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows installer
+            artifact: klm-windows
+          - os: ubuntu-latest
+            label: Linux tarball
+            artifact: klm-linux
+          - os: macos-latest
+            label: macOS app
+            artifact: klm-macos
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install klm and the build tools
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          # `pyinstaller-hooks-contrib` carries the pywebview hook; `pillow` is
+          # only for the icons and is never a runtime dependency of klm.
+          pip install -e ".[app]" pyinstaller pyinstaller-hooks-contrib pillow
+
+      - name: Generate the icons
+        shell: bash
+        run: python packaging/make_icons.py
+
+      - name: Freeze
+        shell: bash
+        run: pyinstaller packaging/klm.spec --noconfirm --clean
+
+      # -- the check that matters ------------------------------------------
+      # uvicorn resolves its loop and protocol implementations by *name* at
+      # runtime, so a frozen build with a missing hidden import starts fine and
+      # dies on the first request. Nothing short of an actual HTTP call finds
+      # that, which is why this runs before anything is packaged.
+      - name: Smoke-test the frozen build (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          bin="dist/klm/klm"
+          [ -d "dist/klm.app" ] && bin="dist/klm.app/Contents/MacOS/klm"
+          "$bin" --version
+          # `doctor` walks the whole import graph, which is what makes it a good
+          # smoke test — but it is a *check*, and klm's convention is 0 ok,
+          # 1 the check failed, 2 klm errored. A runner has no KiCad, so 1 is
+          # the expected answer here and only 2-or-worse is a build problem.
+          set +e; "$bin" doctor; code=$?; set -e
+          [ "$code" -le 1 ] || { echo "doctor exited $code"; exit 1; }
+          "$bin" serve --port 8791 &
+          server=$!
+          trap 'kill $server 2>/dev/null || true' EXIT
+          for _ in $(seq 1 40); do
+            sleep 0.5
+            if curl -fsS http://127.0.0.1:8791/api/health >/dev/null 2>&1; then ok=1; break; fi
+          done
+          [ "${ok:-}" = 1 ] || { echo "the frozen server never answered"; exit 1; }
+          # The UI is data files — exactly what a mis-specified `datas` entry
+          # drops silently, leaving a server that answers and shows nothing.
+          curl -fsS http://127.0.0.1:8791/static/app.js >/dev/null
+          curl -fsS http://127.0.0.1:8791/static/favicon.svg >/dev/null
+          echo "frozen build serves the API and the UI"
+
+      - name: Smoke-test the frozen build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\dist\klm\klm.exe --version
+          # See the POSIX step: `doctor` is a check, and 1 ("something is
+          # missing") is the right answer on a runner with no KiCad.
+          .\dist\klm\klm.exe doctor
+          if ($LASTEXITCODE -gt 1) { throw "doctor exited $LASTEXITCODE" }
+          $server = Start-Process -PassThru -FilePath .\dist\klm\klm.exe `
+            -ArgumentList "serve","--port","8791"
+          try {
+            $ok = $false
+            foreach ($i in 1..40) {
+              Start-Sleep -Milliseconds 500
+              try {
+                if ((Invoke-WebRequest "http://127.0.0.1:8791/api/health" -UseBasicParsing).StatusCode -eq 200) {
+                  $ok = $true; break
+                }
+              } catch { }
+            }
+            if (-not $ok) { throw "the frozen server never answered" }
+            Invoke-WebRequest "http://127.0.0.1:8791/static/app.js" -UseBasicParsing | Out-Null
+            Invoke-WebRequest "http://127.0.0.1:8791/static/favicon.svg" -UseBasicParsing | Out-Null
+            Write-Host "frozen build serves the API and the UI"
+          } finally {
+            Stop-Process -Id $server.Id -Force -ErrorAction SilentlyContinue
+          }
+
+      # -- package ----------------------------------------------------------
+
+      - name: Build the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup --no-progress -y
+            $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          }
+          & $iscc "/DKlmVersion=${{ needs.version.outputs.value }}" packaging\klm.iss
+          Get-ChildItem dist\installer
+
+      - name: Build the Linux tarball
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p dist/installer
+          tar -czf "dist/installer/klm-${{ needs.version.outputs.value }}-linux-x86_64.tar.gz" \
+            -C dist klm
+          ls -la dist/installer
+
+      - name: Build the macOS archive
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p dist/installer
+          # `ditto` rather than `zip`: it preserves the bundle's symlinks and
+          # resource forks, and a `.app` unzipped without them does not launch.
+          ditto -c -k --sequesterRsrc --keepParent \
+            dist/klm.app \
+            "dist/installer/klm-${{ needs.version.outputs.value }}-macos.zip"
+          ls -la dist/installer
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-${{ needs.version.outputs.value }}
+          path: dist/installer/*
+          if-no-files-found: error
+
+  wheel:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: klm-python-${{ needs.version.outputs.value }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [version, build, wheel]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Attach everything to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+          body: |
+            ## Install
+
+            | Platform | Download | Then |
+            |---|---|---|
+            | Windows | `klm-setup-${{ needs.version.outputs.value }}.exe` | Run it. Next, next, next |
+            | macOS | `klm-${{ needs.version.outputs.value }}-macos.zip` | Unzip, drag `klm.app` to Applications |
+            | Linux | `klm-${{ needs.version.outputs.value }}-linux-x86_64.tar.gz` | Unpack, run `klm/klm-app` |
+            | Any | `klm-*.whl` | `pip install klm-*.whl[app]` |
+
+            The CLI ships with every one of them — `klm.exe` beside the app on
+            Windows (on `PATH` if you tick the box), `klm.app/Contents/MacOS/klm`
+            on macOS, `klm/klm` in the tarball.
+
+            ### Two warnings, because neither is avoidable yet
+
+            **Nothing here is code-signed.** Windows SmartScreen will say
+            *"Windows protected your PC"* — choose *More info* → *Run anyway*.
+            macOS Gatekeeper will refuse `klm.app` outright; open it once with
+            right-click → *Open*, or run
+            `xattr -dr com.apple.quarantine /Applications/klm.app`. Both need
+            paid certificates to fix.
+
+            **The Linux tarball is built on Ubuntu's current glibc** and will not
+            run on a much older distribution. `pip install 'klm[app]'` is the
+            better route there, and needs WebKitGTK for the window.

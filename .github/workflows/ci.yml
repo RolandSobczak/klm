@@ -1,0 +1,108 @@
+# The gate. Everything `docs/13-roadmap.md` calls "part of the gate" runs here.
+#
+# klm generates CI for *other people's* repositories (`klm scaffold`), and until
+# now had none of its own — which is the kind of thing that stays true until
+# something breaks on a platform nobody develops on. The matrix is the point:
+# klm writes to KiCad's config, resolves paths, and normalises line endings, and
+# all three of those are where Windows and macOS diverge silently.
+
+name: CI
+
+on:
+  push:
+    branches: ["main", "phase-*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A new push supersedes the run in flight; there is no value in learning that
+  # the commit before last was also fine.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    name: ${{ matrix.os }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.12"]
+        include:
+          # The floor and the ceiling of what `requires-python` promises, on the
+          # cheapest runner. A version claim nothing tests is a guess.
+          - os: ubuntu-latest
+            python: "3.11"
+          - os: ubuntu-latest
+            python: "3.13"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check src tests packaging tools
+
+      - name: Types
+        run: mypy src/klm
+
+      - name: Tests
+        run: pytest -q
+
+  # Kept separate from the matrix: it is one check about the repository, not a
+  # per-platform one, and running it five times would say the same thing five
+  # times.
+  package:
+    name: Wheel and sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+
+      - name: Check the metadata
+        run: twine check dist/*
+
+      - name: Check the wheel carries the UI
+        run: |
+          # The UI is data files, not code, so nothing about it is checked by
+          # importing klm. A wheel that dropped them installs cleanly and then
+          # serves a blank page.
+          python - <<'PY'
+          import pathlib, sys, zipfile
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          names = set(zipfile.ZipFile(wheel).namelist())
+          required = {
+              "klm/api/static/index.html",
+              "klm/api/static/app.js",
+              "klm/api/static/app.css",
+              "klm/api/static/favicon.svg",
+              "klm/_cad/scripts/obj2step.py",
+          }
+          missing = required - names
+          if missing:
+              sys.exit(f"{wheel.name} is missing {sorted(missing)}")
+          print(f"{wheel.name} carries the UI and the FreeCAD script")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-package
+          path: dist/*
+          if-no-files-found: error
