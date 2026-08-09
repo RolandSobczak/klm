@@ -1,0 +1,230 @@
+# 14 — Open Questions
+
+Things this documentation asserts or assumes that have **not been verified**, and must be before
+anything is built on them. Each has an owner phase from [13 — Roadmap](13-roadmap.md).
+
+Treat this as the risk register. Anything here that turns out worse than assumed changes the
+design, not just the implementation.
+
+---
+
+## Q1 — TME API authentication mechanism
+
+**Blocks:** Phase 2
+
+The original design note stated TME uses OAuth 2.0. TME's published developer API is, to the best
+of current understanding, **signature-based** — an application key plus a secret used to sign each
+request — which is a materially different implementation.
+
+**To verify:** current TME developer documentation for the authentication scheme, the exact
+signature algorithm and canonicalization rules, registration requirements, rate limits, and terms
+of use regarding automated access.
+
+**If wrong:** contained. The adapter's auth layer changes; nothing above it does.
+
+---
+
+## Q2 — LCSC API legitimacy and stability ⚠️ highest risk
+
+**Blocks:** Phase 2
+
+LCSC does not publish an official public API for third-party use. The practical options —
+community `jlcsearch`-style services and the EasyEDA component endpoints used by
+`easyeda2kicad`-class tools — are unofficial.
+
+**To verify:**
+- Whether an official LCSC or JLCPCB API now exists and what its terms are.
+- Terms of service for whatever endpoint is used, specifically regarding automated access and
+  redistribution of the data.
+- Realistic stability expectations for the unofficial endpoints.
+
+**If wrong:** this is the risk most likely to force a design change. Mitigations already in the
+design:
+- The adapter interface isolates it completely.
+- A **manual mode** (paste an LCSC part number and the visible fields) is first-class, not a
+  fallback afterthought. klm is fully functional without LCSC automation.
+- Caching is aggressive, so an endpoint disappearing degrades gradually rather than instantly.
+
+**Do not build phase 2's LCSC adapter before answering this.** If the answer is bad, manual mode
+becomes the primary path and the effort goes elsewhere.
+
+---
+
+## Q3 — JLCPCB rotation correction data
+
+**Blocks:** Phase 5
+
+The correction values are empirical community knowledge, not a published specification. They vary
+by footprint library, change over time, and disagree between sources.
+
+**To verify:** the current state of community correction databases, their licensing, and whether
+JLCPCB has published anything authoritative.
+
+**If wrong:** low impact by design. The bundled table is explicitly a *starting point*, and
+`klm fab feedback` ([09 §3](09-manufacturing-outputs.md#learning-from-real-runs)) makes the system
+converge on correct values for the packages actually used. If no usable bundled data exists, klm
+ships with an empty table and learns from run one — slower, but the architecture is unchanged.
+
+---
+
+## Q4 — Licensing of imported library assets
+
+**Blocks:** Phase 3 (for the warning), Phase 4 (for publication)
+
+Redistribution status of EasyEDA/LCSC-derived symbols, footprints and 3D models is unclear. This
+matters specifically because vendored projects are intended for GitHub.
+
+**To verify:** EasyEDA/LCSC terms regarding derived library assets; how comparable tools handle
+attribution; whether KiCad's library license exception covers derived works of this kind.
+
+**If wrong:** klm may need to refuse to vendor certain assets into a repository marked for
+publication, or require explicit acknowledgement. The `license_note` field and
+`klm licenses --project .` already exist to make the question answerable; the policy on top of
+them is undecided.
+
+**klm will not attempt to give legal advice.** It reports origin and flags uncertainty.
+
+---
+
+## Q5 — KiCad version targeting and the IPC API
+
+**Blocks:** Phase 0 (version detection), unscheduled (IPC)
+
+Assumptions to check:
+- Which KiCad version to target as the baseline. KiCad 9 is current; the config path is
+  version-pinned (`~/.config/kicad/<version>/`), so klm detects rather than hardcodes it.
+- Whether the S-expression schema for `.kicad_sym`, `.kicad_mod`, `.kicad_sch` and `.kicad_pcb`
+  differs enough between 8 and 9 to matter. The lossless round-trip design should absorb this —
+  that's largely why it exists — but it needs testing against both.
+- `kicad-cli` command surface and flag stability across versions.
+- The **IPC API** introduced in recent KiCad for external tools to communicate with a running
+  instance. If usable, it enables "push this part into the open project" and live sync. Attractive,
+  entirely optional, and explicitly unscheduled until verified.
+
+**If wrong:** contained by design if the round-trip guarantee holds. Verify it early with a real
+corpus of files from both versions.
+
+---
+
+## Q6 — Label printing hardware
+
+**Blocks:** Phase 7 (only the direct-printing part)
+
+The 14×14 mm label target implies a small thermal label printer. Niimbot and Brother QL devices
+are common in this space but use different, largely undocumented protocols.
+
+**To verify:** which printer is actually available, and whether its vendor software accepts a
+generated image.
+
+**Design position:** klm emits **images and PDFs**, not printer protocol. Vendor software does the
+printing. Direct device support is only considered if a specific device is chosen and a usable
+library exists.
+
+**Also unverified:** whether Data Matrix at ~6×6 mm is reliably scannable by the phone or scanner
+actually used. Test with a printed sample before committing — if it isn't, the fallback is a
+human-readable short ID and no barcode, which is a smaller loss than it sounds.
+
+---
+
+## Q7 — S-expression parsing library choice
+
+**Blocks:** Phase 0
+
+Whether to use an existing KiCad-format Python library or write a generic S-expression
+reader/writer.
+
+**Current position:** write a generic one. [ADR-0002](adr/0002-lossless-sexpr-round-trip.md) sets
+out the reasoning — typed parsers discard unknown nodes and couple to one format version, which
+directly conflicts with the never-lose-user-data goal.
+
+**To verify:** whether a maintained library exists that preserves unknown nodes and round-trips
+losslessly. If one does, use it; the requirement is the guarantee, not the authorship.
+
+---
+
+## Q8 — VAT, customs and import charge modelling
+
+**Blocks:** Phase 6
+
+Landed-cost comparison between a domestic PLN supplier and an imported USD one requires modelling
+import VAT and any applicable duty. Rates, thresholds and collection mechanisms change, and
+getting them wrong produces confidently incorrect financial figures.
+
+**Design position:** all rates and thresholds are **configuration**, never code. Every computed
+total is labelled an estimate, with its assumptions listed. klm does not present tax figures as
+authoritative, and the user is expected to set the values that apply to them.
+
+**To verify:** current rates and thresholds at implementation time, and how they're actually
+collected in practice for the order sizes involved.
+
+---
+
+## Q9 — Catalog scale and performance
+
+**Blocks:** nothing yet; revisit if assumptions break
+
+The design assumes: hundreds to low thousands of parts, tens of projects, single user, single
+machine. At that scale SQLite is comfortable by orders of magnitude and no performance work is
+warranted.
+
+**Watch for:** a catalog beyond ~10,000 parts, 3D assets beyond ~1 GB, or a git repository slow
+enough to be annoying. Any of those would justify revisiting the storage design — none is
+expected.
+
+---
+
+## Q10 — Parametric search quality at TME and LCSC
+
+**Blocks:** Phase 9 (agent quality)
+
+The research agent's usefulness depends on how good the suppliers' parametric search actually is.
+If parametric filtering is weak or inconsistently populated, the agent falls back to keyword
+search plus datasheet reading — which works but is slower and more expensive per session.
+
+**To verify:** field coverage and consistency for the categories that matter (regulators, MCUs,
+passives) in each supplier's API.
+
+**If wrong:** an interesting mitigation the architecture already permits — use DigiKey's or
+Mouser's official API purely as a *parametric search index* (they're excellent at it) and then
+resolve the resulting MPNs to TME/LCSC offers for actual purchase. Free, legitimate, and it
+sidesteps the weakness entirely.
+
+---
+
+## Q11 — KiCad in CI: container, headless rendering, determinism
+
+**Blocks:** Phase 6
+
+The CI workflows assume `kicad-cli` runs reliably in a container with no display. Several details
+are asserted in [15](15-project-scaffolding-and-ci.md) and unverified.
+
+**To verify:**
+- Which official KiCad container image and tag to pin, and its update cadence. An unpinned image
+  means the same commit produces different gerbers next month.
+- Whether `kicad-cli` needs an X server (`xvfb-run`) for any export path on the targeted version.
+  3D render is the usual suspect; PDF and gerber export are believed fine headless. The scaffolded
+  workflow wraps render steps defensively, which is harmless if unnecessary.
+- Exact `kicad-cli` subcommand and flag availability per version — `sch export pdf`,
+  `sch export bom`, `pcb export gerbers|drill|pos|step`, `pcb render`. These have shifted across
+  releases; verify against the pinned version rather than assuming.
+- Which Gerber/drill header fields carry timestamps, and whether zeroing them
+  (`--normalize-timestamps`) is safe for JLCPCB's parser. If it isn't, byte-reproducible artifacts
+  are off the table and artifact diffing needs a different approach.
+
+**If wrong:** contained. Worst case the render artifact is dropped and reproducibility becomes
+best-effort; verification and fab output are unaffected.
+
+---
+
+## Q12 — Interactive BOM and other third-party CI tools
+
+**Blocks:** Phase 6 (optional artifacts only)
+
+The artifacts workflow lists an interactive BOM as an optional output, produced by a community
+tool rather than by klm.
+
+**To verify:** current maintenance status, licensing, KiCad-version compatibility, and whether it
+is packaged in a form that's safe to pin in CI.
+
+**Position:** anything third-party in the artifact pipeline is optional and individually
+switchable in `klm.toml`. A dead upstream should degrade one artifact, never the workflow.

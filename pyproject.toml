@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "klm"
+version = "0.1.0.dev0"
+description = "KiCad Library Manager — parts, libraries, sourcing and fabrication for KiCad projects"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Roland Sobczak" }]
+keywords = ["kicad", "pcb", "electronics", "bom", "library"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Electronic Design Automation (EDA)",
+]
+
+# Phase 0 deliberately has no runtime dependencies beyond the standard library.
+# The S-expression layer must not depend on anything that could change its output.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "hypothesis>=6.100",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.scripts]
+klm = "klm.cli.main:main"
+
+[project.urls]
+Repository = "https://github.com/RolandSobczak/klm"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/klm"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src/klm"]

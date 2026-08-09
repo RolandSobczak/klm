@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": ["Base(npm run *)", "Bash(git commit *)"],
+    "deny": ["Bash(git push *)"],
+    "ask": ["Bash(rm *)", "Bash(mv *)"],
+    "defaultMode": "acceptEdits"
+  }
+}
