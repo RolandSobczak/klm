@@ -101,16 +101,41 @@ Defined with strict JSON schemas and executed by klm, never by the model.
 
 | Tool | Purpose | Notes |
 |---|---|---|
-| `catalog_search` | Search the *existing* catalog first | Deliberately first in the list; reuse beats acquisition |
-| `supplier_search` | Parametric/keyword search at **TME** | Returns offers with stock and price. Not LCSC — see below |
-| `supplier_get_offer` | Details for one supplier part number | |
-| `datasheet_fetch` | Download and cache a datasheet PDF | Returns a document handle, not raw text |
-| `datasheet_extract` | Pull parameters from a cached datasheet | Must return page number + quoted snippet per parameter |
-| `footprint_lookup` | Does the catalog already have this package? | Drives the reuse preference |
-| `propose_part` | Emit a structured candidate | The only "write" — and it writes to a review queue, not the catalog |
+| ✓ `catalog_search` | Search the *existing* catalog first | Deliberately first in the list; reuse beats acquisition |
+| ✓ `supplier_search` | Parametric/keyword search at **TME** | Returns hits with stock. Not LCSC — see below |
+| ✓ `supplier_get_offer` | Details for one supplier part number | The only source of a price or stock claim |
+| ✓ `footprint_lookup` | Does the catalog already have this package? | Drives the reuse preference |
+| ○ `datasheet_fetch` | Download and cache a datasheet PDF | Returns a document handle, not raw text |
+| ○ `datasheet_extract` | Pull parameters from a cached datasheet | Must return page number + quoted snippet per parameter |
+| ○ `propose_part` | Emit a structured candidate | The only "write" — and it writes to a review queue, not the catalog |
+
+`klm.research.tools`; ✓ is built, ○ arrives with its own phase-9 step (the datasheet cache and
+the proposal queue respectively). `klm research tools` lists what a session would have *on this
+machine*, which is worth being able to ask before spending anything.
 
 Notably absent: any tool that writes to the catalog, edits a file, or spends money. The agent
 physically cannot do those things — that's an architectural guarantee, not a prompt instruction.
+It is enforced twice over: no such function exists, and the connection the tools hold is opened
+`mode=ro`, so a write fails inside SQLite rather than in a code review.
+
+Four more properties of the tool layer, each protecting against a failure that would otherwise be
+invisible:
+
+- **Arguments are validated against the same schema the model was given, before a service sees
+  them.** `strict` is a promise made by the other end of a network connection, and a guardrail
+  that holds only while a remote service behaves is not one.
+- **A tool never raises at the model.** A supplier that is down, a category that does not exist,
+  a package klm has never heard of — all come back as results the agent can act on. An exception
+  would end the session instead of redirecting it.
+- **An ambiguous category is refused with its candidates**, never resolved by taking the first
+  match. Picking one would search a category the requirement never mentioned and return a
+  confident list of parts from it.
+- **A constraint that could not be applied is named in the response, with a warning.** Results
+  that were not filtered by a constraint look exactly like results that were.
+
+A tool is also *absent* rather than failing: no TME credentials means no `supplier_search`, and
+LCSC — manual by design — contributes no tools at all rather than one that answers "I don't know"
+to everything.
 
 ### `supplier_search` is TME-only, and never sees an ID
 

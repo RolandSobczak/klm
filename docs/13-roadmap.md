@@ -259,7 +259,11 @@ the agent:
   check`. Hard constraints and ranking preferences are separate types; an unchecked constraint is
   `unknown` rather than `pass`; numeric constraints are the type the parametric search already
   takes, so a requirement reaches TME without a translation step.
-- Tool definitions with strict schemas
+- **Tool definitions with strict schemas** *(done for the four that need nothing later)* —
+  `catalog_search`, `supplier_search`, `supplier_get_offer`, `footprint_lookup`, plus `klm
+  research tools`. Arguments are validated before a service sees them; the connection is
+  read-only. `datasheet_*` and `propose_part` arrive with the datasheet cache and the review
+  queue below.
 - Research agent on the Anthropic tool runner
 - Datasheet fetch, cache, and cited parameter extraction
 - Proposal queue and review UI

@@ -18,7 +18,8 @@ still open, but no longer blocks anything shipped.** **Q8 is resolved too.** Pha
 app) is complete: the API, the job model, eight screens, an SVG renderer for symbols and
 footprints, and the sync diff. **Phase 9 is under way**: the TME v2 migration and constraint→ID
 resolution are done, and so is the requirement schema (`klm.research.requirement`, `klm research
-check`). Next: tool definitions, then the agent itself.
+check`) and the first four agent tools (`klm.research.tools`, `klm research tools`). Next: the
+agent itself on the Anthropic tool runner, the datasheet cache, and the proposal queue.
 
 - `README.md` — entry point and documentation map
 - `docs/01`–`docs/15` — the design, one concern per document
@@ -127,7 +128,19 @@ These are the things that will bite an implementer who hasn't read the docs.
   a field klm never fetched. Ranking a single candidate is meaningless by construction.
 - **The AI agent has no tool that writes to the catalog.** Architectural, not a prompt
   instruction. It proposes into a review queue; a human approves; the result is still only a
-  `draft` that must pass asset QA and lint. See `docs/adr/0006`.
+  `draft` that must pass asset QA and lint. See `docs/adr/0006`. Enforced twice: no such function
+  exists in `klm.research.tools`, and the connection those tools hold is opened `mode=ro`
+  (`connect(..., read_only=True)`), so a write fails in SQLite rather than in a code review.
+- **Tool arguments are validated against the same schema the model was given**, in
+  `research/tools.py`, before a service sees them. `strict` is a promise from the other end of a
+  network connection.
+- **A tool returns an error, it does not raise one.** A supplier outage, an unknown category, an
+  unrecognised package are all results the agent can act on; an exception ends the session. Only a
+  genuine defect in klm propagates — a bug a research session absorbs is a bug nobody ever sees.
+- **An ambiguous category is refused with its candidates.** Taking the first match searches a
+  category the requirement never mentioned and returns a confident list of parts from it.
+- **`footprint_availability` mirrors `_acquire_footprint`'s branch order exactly** (catalog →
+  KiCad → generate → none). If the two drift, the agent recommends reuse that never happens.
 - **Generated output must be byte-stable.** Vendor twice with no changes → `git diff --exit-code`
   passes. Fixed float precision, sorted fields, no incidental timestamps.
 - **The global library and a vendored one are built by one function.** `services/library.py`

@@ -15,6 +15,7 @@ import json
 import os
 import sqlite3
 import sys
+import textwrap
 import tomllib
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -97,6 +98,7 @@ from klm.services.vendor import VendorError, VendorPlan, plan_vendor, unvendor, 
 from klm.services.verify import to_json, verify_clean_room
 from klm.store import AssetKind, AssetStore, Paths, connect, migrate
 from klm.store.db import SCHEMA_VERSION, user_version
+from klm.suppliers.base import SupplierAdapter
 from klm.suppliers.lcsc import is_lcsc_pn, product_url
 from klm.suppliers.registry import build_adapters
 
@@ -413,6 +415,10 @@ def _add_research_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParse
         help="Print the requirement back, normalised — what klm actually understood.",
     )
     check.set_defaults(func=cmd_research_check)
+
+    tools = actions.add_parser("tools", help="What the agent can do on this machine.")
+    tools.add_argument("--format", choices=("text", "json"), default="text")
+    tools.set_defaults(func=cmd_research_tools)
 
 
 def _add_repo_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
@@ -2936,6 +2942,59 @@ def cmd_research_check(args: argparse.Namespace) -> int:
     print(f"{_OK} {args.file} reads as a requirement")
     print()
     print(requirement.to_prompt())
+    return EXIT_OK
+
+
+def cmd_research_tools(args: argparse.Namespace) -> int:
+    """List the tools a research session would have here, and why not others.
+
+    Worth being able to ask before spending anything: with no TME credentials
+    the agent has no `supplier_search`, and finding that out from a session
+    that returned nothing useful is an expensive way to learn it.
+    """
+    from klm.research.tools import ResearchContext, build_toolset
+
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    config = load_config(paths.config)
+
+    # Credentials are resolved from the environment at the point of use, so an
+    # adapter exists whether or not there is a key behind it. A tool that
+    # cannot authenticate is worse than an absent one — the agent spends a turn
+    # discovering it — so the ones without credentials are left out and named.
+    built = build_adapters(config, paths.supplier_cache)
+    adapters: dict[str, SupplierAdapter] = {}
+    absent: list[str] = []
+    for name, adapter in built.items():
+        supplier = config.suppliers[name]
+        if supplier.mode != "api":
+            # LCSC in manual mode answers every lookup with "I don't know", by
+            # design (ADR-0009). Offering that as a tool costs a turn to learn.
+            absent.append(
+                f"{name}: manual mode — its offers are entered by a human, so it has no tools"
+            )
+        elif not supplier.has_credentials():
+            absent.append(f"{name}: no credentials in the environment, so its tools are absent")
+        else:
+            adapters[name] = adapter
+
+    conn = connect(paths.db, create=False, read_only=True)
+    try:
+        toolset = build_toolset(
+            ResearchContext(conn=conn, store=AssetStore(paths.assets), adapters=adapters)
+        )
+        if args.format == "json":
+            print(json.dumps(toolset.definitions(), indent=2))
+            return EXIT_OK
+
+        for tool in toolset.tools:
+            print(f"{_OK} {tool.name}")
+            print(f"    {textwrap.shorten(tool.description, width=88)}")
+        for reason in absent:
+            print(f"{_WARN} {reason}")
+        print(f"{_INFO} no tool writes to the catalog; proposals go to a review queue")
+    finally:
+        conn.close()
     return EXIT_OK
 
 

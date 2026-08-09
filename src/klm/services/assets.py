@@ -34,7 +34,7 @@ from pathlib import Path
 
 from klm.assets import landpattern, templates
 from klm.assets.kicad_libs import KicadLibraries, default_libraries
-from klm.assets.packages import Package, find_package
+from klm.assets.packages import Package, find_package, normalize_package
 from klm.assets.qa import QaReport, QaStatus, check_footprint, check_model3d, check_symbol
 from klm.categories import find_category
 from klm.kicad import footprints as fp
@@ -50,8 +50,10 @@ __all__ = [
     "Acquired",
     "AcquisitionReport",
     "AssetOrigin",
+    "FootprintAvailability",
     "acquire_assets",
     "find_asset_by_filename",
+    "footprint_availability",
     "register_asset",
     "reuse_candidates",
     "run_qa",
@@ -398,6 +400,94 @@ def _acquire_footprint(
         )
 
     return None
+
+
+@dataclass(frozen=True)
+class FootprintAvailability:
+    """Where a package's land pattern would come from, without acquiring it.
+
+    The same three-branch order as :func:`_acquire_footprint` — catalog, then
+    KiCad's libraries, then generate for chips only — deliberately, so that a
+    lookup and an acquisition cannot disagree about what klm can do. The
+    research agent's reuse preference is driven by this answer, and a lookup
+    that said "catalog" where acquisition would generate a new asset would
+    recommend reuse that never happens.
+    """
+
+    package: str
+    known: bool
+    """Whether klm recognises the package at all."""
+    source: str
+    """`catalog` | `kicad` | `generate` | `none`."""
+    kicad_id: str | None = None
+    content_hash: str | None = None
+    filename: str | None = None
+    note: str = ""
+
+
+def footprint_availability(
+    conn: sqlite3.Connection,
+    package_name: str,
+    *,
+    designator: str = "",
+    store: AssetStore | None = None,
+    libs: KicadLibraries | None = None,
+) -> FootprintAvailability:
+    """Answer "does a footprint for this package already exist?" — read-only."""
+    package = find_package(package_name)
+    if package is None:
+        return FootprintAvailability(
+            package=normalize_package(package_name),
+            known=False,
+            source="none",
+            note="klm does not recognise this package; a footprint would have to come from a human",
+        )
+
+    name = package.name
+    lib_id = package.kicad_id(designator)
+    filename = lib_id.split(":", 1)[1] if lib_id else None
+
+    if filename:
+        existing = find_asset_by_filename(conn, AssetKind.FOOTPRINT, filename)
+        if existing and (store is None or store.exists(existing, AssetKind.FOOTPRINT)):
+            return FootprintAvailability(
+                package=name,
+                known=True,
+                source="catalog",
+                kicad_id=lib_id,
+                content_hash=existing,
+                filename=filename,
+                note=f"already in the catalog as {filename}",
+            )
+
+    if lib_id:
+        libraries = libs if libs is not None else default_libraries()
+        if libraries.find_footprint(lib_id) is not None:
+            return FootprintAvailability(
+                package=name,
+                known=True,
+                source="kicad",
+                kicad_id=lib_id,
+                filename=filename,
+                note=f"KiCad ships {lib_id}",
+            )
+
+    if package.generatable:
+        return FootprintAvailability(
+            package=name,
+            known=True,
+            source="generate",
+            kicad_id=lib_id,
+            note="klm generates chip land patterns (IPC-7351B nominal)",
+        )
+
+    return FootprintAvailability(
+        package=name,
+        known=True,
+        source="none",
+        kicad_id=lib_id,
+        note="klm knows the package but has no footprint for it and will not invent one",
+    )
 
 
 def _acquire_model(

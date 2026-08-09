@@ -275,6 +275,34 @@ def list_parts(
     return [_row_to_part(conn, row) for row in rows]
 
 
+def search_parts(
+    conn: sqlite3.Connection,
+    query: str | None = None,
+    *,
+    status: PartStatus | None = None,
+    category: str | None = None,
+    limit: int | None = None,
+) -> list[Part]:
+    """:func:`list_parts`, narrowed by a substring of MPN, maker or description.
+
+    Substring and nothing cleverer. The catalog is small enough that ranked
+    relevance would be a guess dressed as an answer, and a search that returns
+    *everything matching* lets a caller — a person, or the research agent —
+    see for itself what is there.
+    """
+    found = list_parts(conn, status=status, category=category)
+    if query:
+        needle = query.strip().lower()
+        found = [
+            part
+            for part in found
+            if needle in part.mpn.lower()
+            or needle in part.manufacturer.lower()
+            or needle in (part.description or "").lower()
+        ]
+    return found[:limit] if limit is not None else found
+
+
 def count_parts(conn: sqlite3.Connection) -> dict[str, int]:
     rows = conn.execute("SELECT status, COUNT(*) AS n FROM part GROUP BY status").fetchall()
     return {row["status"]: int(row["n"]) for row in rows}

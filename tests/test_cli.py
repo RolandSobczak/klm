@@ -1140,3 +1140,29 @@ def test_research_check_writes_back_what_klm_understood(tmp_path: Path, capsys) 
 
     written = capsys.readouterr().out
     assert 'iout = { min = 1.0, unit = "A" }' in written, "the shorthand is shown resolved"
+
+
+def test_research_tools_lists_what_the_agent_could_do(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    assert main(["init"]) == EXIT_OK
+    monkeypatch.setenv("TME_API_KEY", "key")
+    monkeypatch.setenv("TME_API_SECRET", "secret")
+
+    assert main(["research", "tools"]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "catalog_search" in out and "supplier_search" in out
+    assert "no tool writes to the catalog" in out
+    assert "lcsc: manual mode" in out, "an absent tool says why it is absent"
+
+
+def test_research_tools_without_credentials_offers_no_supplier(home: Path, capsys) -> None:
+    """Learning this from a session that returned nothing useful is expensive."""
+    assert main(["init"]) == EXIT_OK
+
+    assert main(["research", "tools"]) == EXIT_OK
+
+    out = capsys.readouterr().out
+    assert "supplier_search" not in out
+    assert "tme: no credentials" in out
