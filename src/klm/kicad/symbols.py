@@ -13,7 +13,13 @@ from klm.kicad.sexpr import Atom, Document, SExp
 
 __all__ = [
     "extract_symbols",
+    "find_property",
+    "iter_properties",
     "make_library",
+    "properties",
+    "property_name",
+    "property_value",
+    "rename_property",
     "rename_symbol",
     "sanitize_name",
     "set_property",
@@ -83,15 +89,49 @@ def rename_symbol(symbol: SExp, new_name: str) -> None:
             unit_atom.value = f"{new_name}_{unit_name}"
 
 
+def iter_properties(symbol: SExp) -> list[SExp]:
+    """Every ``(property "Name" "value" ...)`` node, in file order."""
+    return [
+        node
+        for node in symbol.children
+        if isinstance(node, SExp)
+        and node.name == "property"
+        and len(node) >= 2
+        and isinstance(node[1], Atom)
+    ]
+
+
+def property_name(node: SExp) -> str:
+    name = node[1]
+    assert isinstance(name, Atom)
+    return name.value
+
+
+def property_value(node: SExp) -> str:
+    if len(node) >= 3 and isinstance(node[2], Atom):
+        return node[2].value
+    return ""
+
+
+def properties(symbol: SExp) -> dict[str, str]:
+    """Properties as a mapping. Later duplicates win, as they do in KiCad."""
+    return {property_name(node): property_value(node) for node in iter_properties(symbol)}
+
+
+def rename_property(node: SExp, new_name: str) -> None:
+    """Rename a field in place, leaving its value and placement alone.
+
+    This is the whole of lint rule S002's fix: a rename touches no value, which
+    is why it is safe to apply mechanically (docs/05 §2).
+    """
+    name = node[1]
+    assert isinstance(name, Atom)
+    name.value = new_name
+
+
 def find_property(symbol: SExp, name: str) -> SExp | None:
-    for node in symbol.children:
-        if (
-            isinstance(node, SExp)
-            and node.name == "property"
-            and len(node) >= 2
-            and isinstance(node[1], Atom)
-            and node[1].value == name
-        ):
+    for node in iter_properties(symbol):
+        if property_name(node) == name:
             return node
     return None
 

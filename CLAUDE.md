@@ -4,17 +4,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-Greenfield, design phase. No source tree, no `pyproject.toml`, no tests, no build/lint commands,
-and not yet a git repository. The repository currently contains only documentation.
+Phases 0 and 1 of `docs/13-roadmap.md` are implemented: file handling, the store, the catalog and
+its git mirror, library generation and KiCad registration, the field schema, value normalization,
+`klm lint` and the pre-commit hook. Phase 2 (supplier sourcing) is next and is blocked on Q1/Q2
+below.
 
 - `README.md` — entry point and documentation map
 - `docs/01`–`docs/15` — the design, one concern per document
 - `docs/adr/` — decision records
+- `src/klm/` — the implementation; `tests/` mirrors it
 - `agentic_pcb_researcher.md` — the original seed note that started the project. **Superseded**
   by `docs/`; kept for provenance. Do not treat it as current design.
 
 When implementing, `docs/` is the spec. Update it when the design changes rather than letting
 code and docs drift.
+
+## Commands
+
+```bash
+.venv/bin/python -m pytest                 # the whole suite
+.venv/bin/python -m pytest tests/test_units.py -q
+.venv/bin/python -m pytest -k "round_trip" # one test by name
+.venv/bin/ruff check src tests             # lint (ruff format is *not* enforced)
+.venv/bin/mypy src/klm                     # strict, and part of the gate
+```
+
+`klm` itself installs into the same venv (`.venv/bin/klm`). `KLM_HOME` points it at a throwaway
+catalog, which is how to try a command without touching the real one.
 
 ## What is being built
 

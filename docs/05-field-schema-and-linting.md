@@ -46,6 +46,16 @@ Anything beginning `KLM_` belongs to klm. Anything else the user adds is preserv
 must be declared in `config.toml` under `[fields.custom]` or the linter flags it as unknown —
 which is how typos get caught.
 
+### Fields klm says nothing about
+
+`ki_keywords`, `ki_description`, `ki_fp_filters` and `ki_locked` are KiCad's own symbol metadata,
+present in every stock symbol. They drive the library browser, not the BOM, so klm passes them
+through and the linter never mentions them.
+
+`Footprint` and `Datasheet` are created empty by KiCad on every new symbol. Their emptiness
+carries no information, so it is not reported as an empty field — a missing footprint is A001's
+business, and a missing datasheet is P006's.
+
 ## 2. The alias map
 
 Real libraries contain historical spellings. The alias map maps them to canonical names:
@@ -101,6 +111,11 @@ Each rule has an ID, a severity, and states whether `--fix` can resolve it.
 | S004 | error | `KLM_ID` missing or not resolvable in the catalog | no |
 | S005 | error | `KLM_ID` present but part is `deprecated` | no |
 | S006 | warning | Field present but empty | no |
+| S007 | warning | Category not set, so the value rules cannot run | no |
+
+Within the catalog, a symbol asset legitimately has no `KLM_ID` — the id lives on the part record
+and is written into the symbol at generation time. There, S004 fires only when a symbol carries an
+id belonging to a *different* part, which is a real corruption rather than an absence.
 
 ### Value (`V`)
 
@@ -120,6 +135,7 @@ Each rule has an ID, a severity, and states whether `--fix` can resolve it.
 | A003 | warning | No 3D model attached | no |
 | A004 | error | Referenced 3D model file missing | no |
 | A005 | warning | Footprint QA status is `warn` or `fail` | no |
+| A006 | error | Referenced asset is missing from the store or unreadable | no |
 
 ### Sourcing (`P`)
 
@@ -148,12 +164,21 @@ Run against a project rather than the catalog.
 ```bash
 klm lint                                   # whole catalog
 klm lint --project .                       # one project's schematic + PCB
+klm lint --rules                           # list every rule, needs no catalog
 klm lint --select S,V --ignore V004        # rule selection
 klm lint --fix                             # apply mechanical fixes
-klm lint --fix --dry-run                   # show the diff, change nothing
+klm lint --fix --dry-run                   # show what would change, change nothing
 klm lint --format json                     # machine-readable, for CI
 klm lint --max-severity warning            # exit non-zero on warnings too
 ```
+
+`--select` and `--ignore` take rule IDs or group letters; `--ignore` wins. The `P` group needs
+supplier data and the `R` group needs project sync, so both arrive with those phases.
+
+Fixes are written to the **stored assets**, never to `generated/` — the generated library is
+rebuilt from the catalog, so a fix written there would survive until the next `klm generate`.
+Because assets are content-addressed and immutable, a fix produces a new asset and leaves the
+previous one in the store: `--fix` is recoverable by construction.
 
 Exit codes: `0` clean, `1` errors found, `2` klm itself failed. Default failure threshold is
 `error`; CI typically sets `--max-severity warning`.
@@ -171,17 +196,24 @@ catalog/01JB…FA     P004  error    SMD part marked for assembly has no LCSC fi
 Three layers, increasingly strict:
 
 1. **Interactive** — the desktop app lints on save and shows findings inline.
-2. **Pre-commit** — a hook in the catalog repository and in each project repository:
+2. **Pre-commit** — a hook in the catalog repository and in each project repository, installed by
+   `klm hook` (and checked by `klm hook --check`):
 
    ```yaml
    - repo: local
      hooks:
        - id: klm-lint
          name: klm lint
-         entry: klm lint --project . --max-severity warning
+         entry: klm lint --max-severity warning
          language: system
-         files: \.(kicad_sch|kicad_pcb|kicad_sym|kicad_mod)$
+         pass_filenames: false
+         files: \.(kicad_sch|kicad_pcb|kicad_sym|kicad_mod|yaml)$
    ```
+
+   The hook is `language: system` and calls the installed `klm` rather than pinning a revision of
+   this repository, so a catalog and its linter cannot drift apart by version. If the repository
+   already has a `.pre-commit-config.yaml`, klm prints the block to paste rather than parsing and
+   rewriting YAML it did not author.
 
 3. **CI** — the same command, plus `klm sync status --exit-code` so a vendored project that has
    drifted from the catalog fails the build ([06](06-library-sync.md)).
@@ -197,6 +229,18 @@ klm lint --select S002,V001 --fix
 klm lint                                        # what remains needs human decisions
 ```
 
+Import reads through the alias map but rewrites nothing: the stored symbol keeps
+`Manufacturer_Part_Number` until lint renames it. Separating the two means an import that fails
+halfway has changed nothing about how the data reads.
+
+A symbol that already carries a `KLM_ID` updates that part instead of creating a second one, so
+re-importing is safe. Symbols that `extend` another are skipped and named in the report — a
+derived symbol without its parent renders nothing, which is worse than not importing it.
+
 Order matters: fix aliases first (mechanical, safe), then values (mostly mechanical), then work
 the remaining errors by hand. Attempting the manual work first means redoing it after the
 mechanical pass shuffles field names.
+
+The value rules need a category, because nothing else can say that `4700` means ohms. Either pass
+`--category Passive/Resistor` on a single-kind library, or set categories before expecting V001
+to do anything; until then S007 says so rather than the V rules silently passing.
