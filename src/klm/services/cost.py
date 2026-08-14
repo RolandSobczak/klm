@@ -31,11 +31,15 @@ from klm.services.bom import Variant, extract_bom
 from klm.services.offers import list_offers
 
 __all__ = [
+    "BASELINE_PATH",
     "CostLine",
     "ProjectCost",
+    "Regression",
     "SpendReport",
     "SpendRow",
+    "compare_snapshots",
     "project_cost",
+    "snapshot",
     "spend_history",
 ]
 
@@ -233,3 +237,131 @@ def _rows(
         )
         for (key, currency), amount in sorted(totals.items())
     ]
+
+
+# ---------------------------------------------------------------------------
+# Regression tracking
+# ---------------------------------------------------------------------------
+
+#: Where a project keeps its committed baseline, so CI finds it without flags.
+BASELINE_PATH = ".klm/cost-baseline.json"
+
+
+def snapshot(
+    conn: sqlite3.Connection | None,
+    project: KiCadProject,
+    *,
+    boards: int = 1,
+    variant: Variant | None = None,
+) -> dict[str, object]:
+    """What this board is, and — if a catalog is at hand — what it costs.
+
+    ``conn`` may be ``None``, and that is the case that matters: the BOM half
+    works on a machine with no catalog, which is the machine the project's own
+    CI runs on. The cost half simply does not appear, rather than appearing as
+    zero.
+
+    Quantities are per board so the BOM comparison is independent of how many
+    boards the baseline was taken at. Output is sorted and carries no
+    timestamp: a baseline that changes on every run is one nobody commits.
+    """
+    boards = max(int(boards), 1)
+    bom = extract_bom(conn, project, variant=variant)
+    document: dict[str, object] = {
+        "project": project.name,
+        "variant": variant.name if variant else "",
+        "boards": boards,
+        "bom": {_key(line.klm_id, line.mpn, line.value): line.quantity for line in bom.lines},
+    }
+    if conn is not None:
+        cost = project_cost(conn, project, boards=boards, variant=variant)
+        document["cost"] = {c: round(total, 4) for c, total in sorted(cost.totals.items())}
+        document["unpriced"] = sorted(line.mpn for line in cost.unpriced)
+    return document
+
+
+def _key(klm_id: str | None, mpn: str, value: str) -> str:
+    return klm_id or f"?{mpn or value}"
+
+
+def _quantities(raw: object) -> dict[str, int]:
+    """A baseline is a file on disk, so nothing in it is trusted to be shaped."""
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): int(value) for key, value in raw.items()}
+
+
+def _names(raw: object) -> set[str]:
+    return {str(item) for item in raw} if isinstance(raw, list) else set()
+
+
+@dataclass
+class Regression:
+    """What changed between a committed baseline and the board as it is now."""
+
+    added: list[str] = field(default_factory=list)
+    removed: list[str] = field(default_factory=list)
+    changed: list[tuple[str, int, int]] = field(default_factory=list)
+    """key, was, now — per board."""
+    cost: list[tuple[str, float, float, float]] = field(default_factory=list)
+    """currency, was, now, percent change."""
+    over_tolerance: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    """Why something could not be compared. Never silently a pass."""
+
+    @property
+    def bom_changed(self) -> bool:
+        return bool(self.added or self.removed or self.changed)
+
+    @property
+    def ok(self) -> bool:
+        return not (self.bom_changed or self.over_tolerance or self.notes)
+
+
+def compare_snapshots(
+    baseline: dict[str, object], current: dict[str, object], *, tolerance: float = 0.0
+) -> Regression:
+    """Compare a snapshot against a committed one.
+
+    ``tolerance`` is a percentage the total may rise by before it counts. A BOM
+    change is always reported: it is the thing a cost change is usually caused
+    by, and an unintended one is exactly what this check exists to stop. An
+    intended one is a re-run of ``klm cost baseline``.
+    """
+    result = Regression()
+    was = _quantities(baseline.get("bom"))
+    now = _quantities(current.get("bom"))
+
+    result.added = sorted(set(now) - set(was))
+    result.removed = sorted(set(was) - set(now))
+    result.changed = [
+        (key, was[key], now[key]) for key in sorted(set(was) & set(now))
+        if was[key] != now[key]
+    ]
+
+    old_cost = baseline.get("cost")
+    new_cost = current.get("cost")
+    if isinstance(old_cost, dict) and not isinstance(new_cost, dict):
+        # The baseline was priced and this run was not — a check that could not
+        # run is not a check that passed (docs/08 §5).
+        result.notes.append("the baseline carries a cost and this run has no catalog to price it")
+        return result
+    if not isinstance(old_cost, dict) or not isinstance(new_cost, dict):
+        return result
+
+    for currency in sorted(set(old_cost) | set(new_cost)):
+        before = float(old_cost.get(currency, 0.0))
+        after = float(new_cost.get(currency, 0.0))
+        if currency not in old_cost or currency not in new_cost:
+            result.notes.append(f"{currency} appears on only one side, so it was not compared")
+            continue
+        percent = ((after - before) / before * 100.0) if before else 0.0
+        result.cost.append((currency, before, after, percent))
+        if after > before and percent > tolerance:
+            result.over_tolerance.append(
+                f"{currency} {before:.2f} → {after:.2f} ({percent:+.1f}%)"
+            )
+
+    for mpn in sorted(_names(current.get("unpriced")) - _names(baseline.get("unpriced"))):
+        result.notes.append(f"{mpn} has no offer to price it, so the total is incomplete")
+    return result

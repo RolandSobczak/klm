@@ -100,6 +100,18 @@ jobs:
 
       - name: Preflight
         run: klm fab --check --format github
+
+      - name: Cost and BOM regression
+        # Only if the project committed a baseline. Without a catalog here the
+        # comparison is the BOM half alone, which is the half that runs on a
+        # stranger's machine — a priced baseline says so and fails rather than
+        # quietly passing. Record one with `klm cost baseline`.
+        run: |
+          if [ -f .klm/cost-baseline.json ]; then
+            klm cost check --format github
+          else
+            echo "no .klm/cost-baseline.json; skipping"
+          fi
 """
 
 

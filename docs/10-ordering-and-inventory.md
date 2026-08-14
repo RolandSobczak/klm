@@ -253,3 +253,28 @@ on receiving adjusts stock and is recorded on the line, but the money left the a
 
 *Not built: comparing two revisions of a board (`klm cost compare`). It needs project history
 checked out at each revision, which is a different problem from pricing one.*
+
+### Regression tracking in CI
+
+A board's BOM and its cost drift the way code does, and the drift is only visible if something
+remembers what they were:
+
+```bash
+klm cost baseline --qty 5             # writes .klm/cost-baseline.json — commit it
+klm cost check --tolerance 5          # exit 1 if the BOM changed or the total rose >5%
+```
+
+The scaffolded `verify` workflow runs `klm cost check --format github` when the baseline file
+exists, and skips with a note when it does not.
+
+Three properties make it usable in CI rather than merely present:
+
+- **The BOM half runs with no catalog**, like `klm bom` does, which is what makes it work on a
+  stranger's machine. A baseline that recorded a cost and is checked without a catalog **fails**
+  and says why — a check that could not run is not a check that passed.
+- **Quantities are per board**, so the comparison does not depend on the quantity the baseline was
+  taken at. The cost comparison re-prices at the baseline's own quantity.
+- **A BOM change always fails, a cheaper board never does.** An unintended BOM change is what the
+  baseline exists to catch; an intended one is a re-run of `klm cost baseline` in the same commit.
+  A currency present on only one side, or a line that has lost its price, is reported as not
+  compared rather than folded into a percentage.

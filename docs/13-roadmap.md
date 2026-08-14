@@ -305,6 +305,10 @@ attached to nothing.*
   the break each line's own quantity reaches, and spend by month, supplier and category from
   placed orders. Unpriced lines and per-currency totals are reported rather than reconciled.
   `klm cost compare` is still not built (see docs/10 §9).
+- **Cost/BOM regression tracking in CI** *(done)* — `klm cost baseline` writes a committed
+  `.klm/cost-baseline.json`; `klm cost check` fails on a BOM change or a rise past `--tolerance`,
+  and the scaffolded `verify` workflow runs it when a baseline exists. The BOM half needs no
+  catalog; a priced baseline checked without one fails rather than passing quietly.
 
 - **Substitute management** *(done)* — an approved substitution is recorded against a part with
   its reason, who approved it, and the mechanical verdict klm saw *at the time*
@@ -318,7 +322,6 @@ attached to nothing.*
 - Additional supplier adapters (Mouser/DigiKey as parametric search only; Botland, Kamami)
 - KiCad IPC API integration — push a part into a running KiCad session ([Q5](14-open-questions.md#q5))
 - Assembly instructions and per-build checklists
-- Cost/BOM regression tracking in CI
 
 ## Sequencing rationale, in one line each
 

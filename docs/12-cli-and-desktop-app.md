@@ -119,6 +119,8 @@ klm labels scan <SHORTID>
 
 klm cost project [--project DIR] [--qty N] [--variant NAME] [--exit-code]
 klm cost history
+klm cost baseline [--qty N] [--output FILE]      Commit .klm/cost-baseline.json
+klm cost check [--tolerance PCT] [--format github]   BOM/cost regression, for CI
 ```
 
 Conventions applied uniformly:

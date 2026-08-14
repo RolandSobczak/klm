@@ -40,6 +40,7 @@ from klm.services.assets import (
 from klm.services.bom import BomReport, Variant, extract_bom, load_variants
 from klm.services.catalog import get_part, list_parts, save_part
 from klm.services.corrections import delete_pattern, list_patterns, part_corrections, set_pattern
+from klm.services.cost import BASELINE_PATH
 from klm.services.demand import DemandLine, SparesPolicy, parse_build_plan, plan_demand
 from klm.services.docs import build_docs, github_summary, json_report
 from klm.services.exporter import PART_FILE, export_catalog, import_catalog
@@ -548,6 +549,22 @@ def _add_fab_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -
     spend = cost_actions.add_parser("history", help="What has been spent, and on what.")
     spend.add_argument("--format", choices=("text", "json"), default="text")
     spend.set_defaults(func=cmd_cost_history)
+
+    baseline = cost_actions.add_parser("baseline", help="Record today's BOM and cost, for CI.")
+    _project_argument(baseline)
+    baseline.add_argument("--qty", type=int, default=1, help="Boards the cost is taken at.")
+    baseline.add_argument("--variant", metavar="NAME", help="Build variant from klm.toml.")
+    baseline.add_argument("--output", metavar="FILE", help=f"Default: {BASELINE_PATH}")
+    baseline.set_defaults(func=cmd_cost_baseline)
+
+    checking = cost_actions.add_parser("check", help="Compare the board against its baseline.")
+    _project_argument(checking)
+    checking.add_argument("--baseline", metavar="FILE", help=f"Default: {BASELINE_PATH}")
+    checking.add_argument(
+        "--tolerance", type=float, default=0.0, help="Percent the total may rise by (default: 0)."
+    )
+    checking.add_argument("--format", choices=("text", "json", "github"), default="text")
+    checking.set_defaults(func=cmd_cost_check)
 
     fab = sub.add_parser("fab", help="Build a fabrication package, or check one could be.")
     fab_actions = fab.add_subparsers(dest="action", metavar="ACTION")
@@ -2404,6 +2421,95 @@ def cmd_cost_project(args: argparse.Namespace) -> int:
         print(f"{_WARN} no offer prices {line.mpn} ({line.quantity} needed)")
     print(f"{_INFO} parts only, at today's offers, ignoring what is already on the shelf")
     return EXIT_CHECK_FAILED if args.exit_code and not cost.complete else EXIT_OK
+
+
+def cmd_cost_baseline(args: argparse.Namespace) -> int:
+    """Record what this board is and what it costs, for CI to compare against."""
+    from klm.services.cost import snapshot
+
+    paths = Paths.resolve(args.catalog)
+    project = find_project(args.project)
+    conn = connect(paths.db, create=False) if paths.db.is_file() else None
+    try:
+        document = snapshot(
+            conn, project, boards=args.qty, variant=_variant(project, args.variant)
+        )
+    finally:
+        if conn is not None:
+            conn.close()
+
+    target = Path(args.output) if args.output else project.root / BASELINE_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(f"{_OK} baseline written to {target}")
+    if "cost" not in document:
+        print(f"{_INFO} no catalog here, so the baseline records the BOM only")
+    return EXIT_OK
+
+
+def cmd_cost_check(args: argparse.Namespace) -> int:
+    """Compare the board against its committed baseline. Made for CI."""
+    from klm.services.cost import compare_snapshots, snapshot
+
+    paths = Paths.resolve(args.catalog)
+    project = find_project(args.project)
+    source = Path(args.baseline) if args.baseline else project.root / BASELINE_PATH
+    if not source.is_file():
+        print(f"{_WARN} no baseline at {source}; run `klm cost baseline` to record one")
+        return EXIT_CHECK_FAILED
+    baseline = json.loads(source.read_text(encoding="utf-8"))
+
+    conn = connect(paths.db, create=False) if paths.db.is_file() else None
+    try:
+        current = snapshot(
+            conn,
+            project,
+            boards=int(baseline.get("boards", 1)),
+            variant=_variant(project, baseline.get("variant") or None),
+        )
+    finally:
+        if conn is not None:
+            conn.close()
+
+    result = compare_snapshots(baseline, current, tolerance=args.tolerance)
+    if args.format == "json":
+        print(json.dumps({
+            "ok": result.ok,
+            "added": result.added,
+            "removed": result.removed,
+            "changed": [
+                {"key": key, "was": was, "now": now} for key, was, now in result.changed
+            ],
+            "cost": [
+                {"currency": c, "was": was, "now": now, "percent": pct}
+                for c, was, now, pct in result.cost
+            ],
+            "over_tolerance": result.over_tolerance,
+            "notes": result.notes,
+        }, indent=2, ensure_ascii=False))
+        return EXIT_OK if result.ok else EXIT_CHECK_FAILED
+
+    messages = [
+        *(("error", f"part added since the baseline: {key}") for key in result.added),
+        *(("error", f"part removed since the baseline: {key}") for key in result.removed),
+        *(
+            ("error", f"{key}: {was} per board in the baseline, {now} now")
+            for key, was, now in result.changed
+        ),
+        *(("error", f"cost rose past the tolerance: {note}") for note in result.over_tolerance),
+        *(("warning", note) for note in result.notes),
+    ]
+    if args.format == "github":
+        for severity, message in messages:
+            print(_annotate(severity, message))
+    else:
+        for severity, message in messages:
+            print(f"{_FAIL if severity == 'error' else _WARN} {message}")
+        for currency, was, now, percent in result.cost:
+            print(f"{_INFO} {currency}: {was:.2f} → {now:.2f} ({percent:+.1f}%)")
+        if result.ok:
+            print(f"{_OK} the board matches its baseline")
+    return EXIT_OK if result.ok else EXIT_CHECK_FAILED
 
 
 def cmd_cost_history(args: argparse.Namespace) -> int:
