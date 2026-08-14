@@ -532,6 +532,23 @@ def _add_fab_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -
     bom.add_argument("--format", choices=("text", "csv", "json"), default="text")
     bom.set_defaults(func=cmd_bom)
 
+    cost = sub.add_parser("cost", help="What a board costs, and what has been spent.")
+    cost_actions = cost.add_subparsers(dest="action", metavar="ACTION", required=True)
+
+    costing = cost_actions.add_parser("project", help="Price a project's BOM at a quantity.")
+    _project_argument(costing)
+    costing.add_argument("--qty", type=int, default=1, help="How many boards (default: 1).")
+    costing.add_argument("--variant", metavar="NAME", help="Build variant from klm.toml.")
+    costing.add_argument("--format", choices=("text", "json"), default="text")
+    costing.add_argument(
+        "--exit-code", action="store_true", help="Exit 1 if any line could not be priced."
+    )
+    costing.set_defaults(func=cmd_cost_project)
+
+    spend = cost_actions.add_parser("history", help="What has been spent, and on what.")
+    spend.add_argument("--format", choices=("text", "json"), default="text")
+    spend.set_defaults(func=cmd_cost_history)
+
     fab = sub.add_parser("fab", help="Build a fabrication package, or check one could be.")
     fab_actions = fab.add_subparsers(dest="action", metavar="ACTION")
     _project_argument(fab)
@@ -2333,6 +2350,105 @@ def cmd_bom(args: argparse.Namespace) -> int:
     if report.unresolved:
         print(f"{_WARN} no catalog part for: {', '.join(report.unresolved[:10])}")
         return EXIT_CHECK_FAILED
+    return EXIT_OK
+
+
+def cmd_cost_project(args: argparse.Namespace) -> int:
+    """What the parts for this board cost, at the quantity being built."""
+    from klm.services.cost import project_cost
+
+    paths, project = _open_project(args)
+    conn = connect(paths.db, create=False)
+    try:
+        cost = project_cost(
+            conn, project, boards=args.qty, variant=_variant(project, args.variant)
+        )
+    finally:
+        conn.close()
+
+    if args.format == "json":
+        print(json.dumps({
+            "project": cost.project,
+            "boards": cost.boards,
+            "variant": cost.variant,
+            "totals": cost.totals,
+            "per_board": cost.per_board,
+            "lines": [
+                {
+                    "klm_id": line.klm_id,
+                    "mpn": line.mpn,
+                    "per_board": line.per_board,
+                    "quantity": line.quantity,
+                    "unit_price": line.unit_price,
+                    "currency": line.currency,
+                    "supplier": line.supplier,
+                    "subtotal": line.subtotal,
+                }
+                for line in (*cost.lines, *cost.unpriced)
+            ],
+            "unpriced": [line.mpn for line in cost.unpriced],
+        }, indent=2, ensure_ascii=False))
+        return EXIT_CHECK_FAILED if args.exit_code and not cost.complete else EXIT_OK
+
+    for line in cost.lines:
+        print(
+            f"  {line.quantity:>5} x {line.mpn:<28} {line.unit_price:>8.4g}"
+            f" {line.currency or '':<4} {line.subtotal or 0.0:>9.2f}  [{line.supplier}]"
+        )
+    for currency, total in sorted(cost.totals.items()):
+        per_board = cost.per_board[currency]
+        print(f"\n  {total:.2f} {currency} for {cost.boards} board(s) — {per_board:.2f} each")
+    if not cost.totals:
+        print(f"{_WARN} nothing on this board could be priced")
+    for line in cost.unpriced:
+        print(f"{_WARN} no offer prices {line.mpn} ({line.quantity} needed)")
+    print(f"{_INFO} parts only, at today's offers, ignoring what is already on the shelf")
+    return EXIT_CHECK_FAILED if args.exit_code and not cost.complete else EXIT_OK
+
+
+def cmd_cost_history(args: argparse.Namespace) -> int:
+    """Spend over time, by supplier and by category. Placed orders only."""
+    from klm.services.cost import spend_history
+
+    paths = Paths.resolve(args.catalog)
+    _require_catalog(paths)
+    conn = connect(paths.db, create=False)
+    try:
+        report = spend_history(conn)
+    finally:
+        conn.close()
+
+    if args.format == "json":
+        print(json.dumps({
+            section: [
+                {"key": row.key, "currency": row.currency, "amount": row.amount,
+                 "orders": row.orders}
+                for row in rows
+            ]
+            for section, rows in (
+                ("by_month", report.by_month),
+                ("by_supplier", report.by_supplier),
+                ("by_category", report.by_category),
+            )
+        } | {"unpriced_lines": report.unpriced_lines}, indent=2, ensure_ascii=False))
+        return EXIT_OK
+
+    for title, rows in (
+        ("by month", report.by_month),
+        ("by supplier", report.by_supplier),
+        ("by category", report.by_category),
+    ):
+        if not rows:
+            continue
+        print(f"\n{title}")
+        for row in rows:
+            orders = f"  ({row.orders} order(s))" if row.orders else ""
+            print(f"  {row.key:<24} {row.amount:>9.2f} {row.currency}{orders}")
+    if not report.by_month:
+        print(f"{_INFO} no placed orders yet; a draft is a plan, not spend")
+        return EXIT_OK
+    if report.unpriced_lines:
+        print(f"\n{_WARN} {report.unpriced_lines} ordered line(s) carry no price and are missing")
     return EXIT_OK
 
 

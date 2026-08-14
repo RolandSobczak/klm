@@ -117,7 +117,7 @@ klm stock consume --build "1xsensor-board:full" | threshold <ID_OR_MPN> N
 klm labels print [--order ID] [--location GLOB] [--part ID_OR_MPN] [--format pdf|png]
 klm labels scan <SHORTID>
 
-klm cost project <name> --qty N
+klm cost project [--project DIR] [--qty N] [--variant NAME] [--exit-code]
 klm cost history
 ```
 

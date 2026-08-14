@@ -138,6 +138,10 @@ These are the things that will bite an implementer who hasn't read the docs.
   Pin *names* are compared, not just numbers and types: two parts can share a footprint and a
   type map while pin 3 is `EN` on one and `GND` on the other. A missing asset is `unchecked`,
   never `compatible` — the QA gate's rule, where getting it wrong puts the wrong part on a board.
+- **A cost estimate never mixes currencies and never prices a line it cannot.** `klm cost project`
+  totals per currency and lists unpriced lines; `--exit-code` fails CI on an incomplete one. The
+  quantity is not a multiplier — each line is priced at the break its own run quantity reaches.
+  `klm cost history` counts placed orders only: a draft is a plan, not spend.
 - **An approved substitution is recorded, never applied.** `klm order plan` names an approved,
   orderable substitute on a line no supplier can fill and stops there. klm knows the substitution
   was approved; it does not know it was approved for *this* build. The record is directional (B

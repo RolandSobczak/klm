@@ -300,6 +300,12 @@ attached to nothing.*
 
 ## Shipped after phase 9
 
+- **`klm cost project|history`** *(done)* — phase 7 listed `klm cost *` and it never shipped, so
+  docs/10 §9 described a command that did not exist. It does now: parts cost for a run, priced at
+  the break each line's own quantity reaches, and spend by month, supplier and category from
+  placed orders. Unpriced lines and per-currency totals are reported rather than reconciled.
+  `klm cost compare` is still not built (see docs/10 §9).
+
 - **Substitute management** *(done)* — an approved substitution is recorded against a part with
   its reason, who approved it, and the mechanical verdict klm saw *at the time*
   (`klm substitutes --approve|--revoke|--approved`, `klm.services.substitutes`). Ordering reports
