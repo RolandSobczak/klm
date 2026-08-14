@@ -298,10 +298,16 @@ because it's the phase that most benefits from everything else existing: the age
 value is verified by the phase-2 offer data. Built first, it would be an impressive demo
 attached to nothing.*
 
+## Shipped after phase 9
+
+- **Substitute management** *(done)* — an approved substitution is recorded against a part with
+  its reason, who approved it, and the mechanical verdict klm saw *at the time*
+  (`klm substitutes --approve|--revoke|--approved`, `klm.services.substitutes`). Ordering reports
+  an approved, orderable substitute on a line no supplier can fill; it never swaps one in, because
+  klm knows the substitution was approved but not that it was approved for *this* build.
+
 ## Later, unscheduled
 
-- Substitute *management* — recording an approved substitution against a part, so a BOM can use
-  it. The mechanical compatibility check itself shipped with phase 9 (`klm substitutes`)
 - Multi-board projects (panelization, motherboard/daughterboard sets)
 - Additional supplier adapters (Mouser/DigiKey as parametric search only; Botland, Kamami)
 - KiCad IPC API integration — push a part into a running KiCad session ([Q5](14-open-questions.md#q5))

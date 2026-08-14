@@ -29,8 +29,10 @@ inputs, both on the same pad, and one of them destroys the board.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from klm.kicad import footprints as fp
 from klm.kicad.sexpr import SExp, loads
@@ -44,9 +46,13 @@ from klm.store.assets import AssetError, AssetKind, AssetStore
 __all__ = [
     "Candidate",
     "Compatibility",
+    "Substitution",
+    "approve_substitute",
     "compare",
     "find_substitutes",
+    "list_substitutions",
     "pin_map",
+    "revoke_substitute",
 ]
 
 STATUS_COMPATIBLE = "compatible"
@@ -227,6 +233,113 @@ def _describe(conn: sqlite3.Connection, part: Part, compatibility: Compatibility
         currency=cheapest[1] if cheapest else None,
         suppliers=tuple(sorted({offer.supplier for offer in offers})),
     )
+
+
+# ---------------------------------------------------------------------------
+# Approved substitutions
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Substitution:
+    """A human's decision that one part may stand in for another.
+
+    The mechanical verdict is stored *as it was at approval time*, differences
+    and all. Approving something klm called `differs` is legitimate — that is
+    what a human overruling the geometry looks like — but the record has to
+    keep what was overruled, or the approval reads as agreement.
+    """
+
+    klm_id: str
+    substitute_id: str
+    reason: str
+    approved_at: str
+    approved_by: str = ""
+    verdict: str = STATUS_UNCHECKED
+    differences: tuple[str, ...] = ()
+
+
+def approve_substitute(
+    conn: sqlite3.Connection,
+    store: AssetStore,
+    part: Part,
+    other: Part,
+    *,
+    reason: str,
+    approved_by: str = "",
+    now: str | None = None,
+) -> Substitution:
+    """Record that ``other`` may be built in place of ``part``.
+
+    Re-approving replaces the previous record, which re-runs the comparison —
+    an approval made when the two parts matched should not keep asserting that
+    after one of their footprints was regenerated.
+    """
+    if not reason.strip():
+        raise ValueError("a substitution needs a reason; it is the only thing that ages well")
+    if part.klm_id == other.klm_id:
+        raise ValueError("a part cannot substitute for itself")
+
+    compatibility = compare(store, part, other)
+    record = Substitution(
+        klm_id=part.klm_id,
+        substitute_id=other.klm_id,
+        reason=reason.strip(),
+        approved_at=now or datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        approved_by=approved_by,
+        verdict=compatibility.status,
+        differences=tuple(compatibility.explain()),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO substitution"
+        " (klm_id, substitute_id, approved_at, approved_by, reason, verdict, differences)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            record.klm_id,
+            record.substitute_id,
+            record.approved_at,
+            record.approved_by,
+            record.reason,
+            record.verdict,
+            json.dumps(list(record.differences)),
+        ),
+    )
+    conn.commit()
+    return record
+
+
+def list_substitutions(
+    conn: sqlite3.Connection, klm_id: str | None = None
+) -> list[Substitution]:
+    """Approved substitutions, for one part or for the whole catalog."""
+    sql = "SELECT * FROM substitution"
+    params: tuple[str, ...] = ()
+    if klm_id is not None:
+        sql += " WHERE klm_id = ?"
+        params = (klm_id,)
+    sql += " ORDER BY klm_id, substitute_id"
+    return [
+        Substitution(
+            klm_id=row["klm_id"],
+            substitute_id=row["substitute_id"],
+            reason=row["reason"],
+            approved_at=row["approved_at"],
+            approved_by=row["approved_by"],
+            verdict=row["verdict"],
+            differences=tuple(json.loads(row["differences"] or "[]")),
+        )
+        for row in conn.execute(sql, params)
+    ]
+
+
+def revoke_substitute(conn: sqlite3.Connection, klm_id: str, substitute_id: str) -> bool:
+    """Drop an approval. Returns whether there was one to drop."""
+    cursor = conn.execute(
+        "DELETE FROM substitution WHERE klm_id = ? AND substitute_id = ?",
+        (klm_id, substitute_id),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
 
 
 def _plausible(part: Part, other: Part) -> bool:

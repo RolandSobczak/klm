@@ -9,6 +9,7 @@ exactly that bug.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -531,3 +532,39 @@ def test_a_png_is_written_at_the_requested_size(tmp_path: Path) -> None:
 def test_an_empty_sheet_still_produces_a_valid_pdf(tmp_path: Path) -> None:
     target = write_pdf([], tmp_path / "empty.pdf")
     assert target.read_bytes().startswith(b"%PDF")
+
+
+def test_an_approved_substitute_is_reported_when_the_part_cannot_be_bought(
+    env, tmp_path: Path
+) -> None:
+    """Reported, never swapped in — the BOM still names the part it names."""
+    from klm.services.offers import save_offer
+    from klm.services.substitutes import approve_substitute
+
+    _paths, conn, store = env
+    part = seed_resistor(store, conn)
+    project = _project(make_project(tmp_path / "sensor-board"))
+    stand_in = save_part(
+        conn,
+        Part(
+            klm_id="KLM00000042",
+            mpn="R-ALT",
+            manufacturer="Acme",
+            package=part.package,
+            category=part.category,
+            status=PartStatus.APPROVED,
+        ),
+    )
+    save_offer(conn, replace(offer("tme", 0.01), supplier_pn="ALT-1", klm_id=stand_in.klm_id))
+    approve_substitute(conn, store, part, stand_in, reason="same value, same land pattern")
+
+    plan = plan_demand(
+        conn,
+        parse_build_plan("10x sensor-board"),
+        projects_root={"sensor-board": project},
+        policy=SparesPolicy(default=SparesRule()),
+    )
+    line = plan.lines[0]
+    assert [p.mpn for p in line.alternates] == ["R-ALT"]
+    assert line.klm_id == RESISTOR_ID, "the plan still orders the part the BOM names"
+    assert "approved substitute R-ALT" in " ".join(line.explain())

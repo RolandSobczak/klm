@@ -196,7 +196,34 @@ klm labels scan 01JB4K7Q                      # decode a scanned ID → part pag
 `--order` is the workflow that matters: parts arrive, you print exactly the labels for what
 arrived, stick them on drawers, and record locations in one pass.
 
-## 8. Cost reporting
+## 8. Approved substitutions
+
+`klm substitutes` (docs/11 §8) answers a mechanical question: same land pattern, same pinout.
+Whether the part actually fits *this* circuit is a human's judgement, and once made it is worth
+recording rather than re-deriving each time a supplier runs out:
+
+```bash
+klm substitutes RC0402FR-0710KL --approve CRCW040210K0FKED --reason "same 1% 10k" --by rs
+klm substitutes RC0402FR-0710KL --approved     # with a re-check against today's assets
+klm substitutes RC0402FR-0710KL --revoke CRCW040210K0FKED
+```
+
+Four properties, each of them a decision:
+
+- **A reason is required**, as it is for a rejected proposal. An approval nobody explained cannot
+  be reviewed a year later, which makes it indistinguishable from a mistake.
+- **The mechanical verdict at approval time is stored**, differences and all. Approving something
+  klm called `differs` is legitimate — a human overruling the geometry is exactly what this record
+  is for — but keeping what was overruled is what stops the approval reading as agreement. Listing
+  re-runs the comparison and flags a verdict that has since changed, because assets move.
+- **It is directional.** Approving B in place of A says nothing about A in place of B: the part
+  with the tighter specification is not interchangeable in both directions.
+- **Ordering reports, it never swaps.** When no enabled supplier can fill a line, `klm order plan`
+  names any approved substitute that *is* orderable. It stops there. klm knows the substitution
+  was approved; it does not know it was approved for this build, and quietly ordering a part the
+  BOM does not name is how the wrong component reaches a board.
+
+## 9. Cost reporting
 
 Useful side effect of having all of this in one database:
 

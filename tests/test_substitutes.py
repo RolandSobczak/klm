@@ -19,7 +19,14 @@ from klm.kicad.sexpr import loads
 from klm.kicad.symbols import extract_symbols
 from klm.model import Part, PartStatus
 from klm.services.catalog import save_part
-from klm.services.substitutes import compare, find_substitutes, pin_map
+from klm.services.substitutes import (
+    approve_substitute,
+    compare,
+    find_substitutes,
+    list_substitutions,
+    pin_map,
+    revoke_substitute,
+)
 from klm.store.assets import AssetKind
 
 TWO_PIN = """\
@@ -234,3 +241,74 @@ def test_an_unrelated_catalog_part_is_ignored(env) -> None:  # type: ignore[no-u
 def test_every_fixture_symbol_reads(symbol: str) -> None:
     (parsed,) = extract_symbols(loads(symbol))
     assert pin_map(parsed)
+
+
+# ---------------------------------------------------------------------------
+# Approving one
+# ---------------------------------------------------------------------------
+
+
+def test_an_approval_records_the_verdict_it_was_made_against(env) -> None:  # type: ignore[no-untyped-def]
+    _, conn, store = env
+    part = stored(store, conn, "REG-A", REGULATOR)
+    other = stored(store, conn, "REG-C", REGULATOR_OTHER_PIN3)
+
+    record = approve_substitute(
+        conn, store, part, other, reason="pin 3 is unconnected on this board", approved_by="rs"
+    )
+
+    assert record.verdict == "differs"
+    assert any("'en' vs 'nc'" in d for d in record.differences)
+    assert list_substitutions(conn, part.klm_id) == [record]
+
+
+def test_an_approval_without_a_reason_is_refused(env) -> None:  # type: ignore[no-untyped-def]
+    _, conn, store = env
+    part = stored(store, conn, "REG-A", REGULATOR)
+    other = stored(store, conn, "REG-B", REGULATOR)
+
+    with pytest.raises(ValueError, match="reason"):
+        approve_substitute(conn, store, part, other, reason="  ")
+
+
+def test_a_part_cannot_substitute_for_itself(env) -> None:  # type: ignore[no-untyped-def]
+    _, conn, store = env
+    part = stored(store, conn, "REG-A", REGULATOR)
+
+    with pytest.raises(ValueError, match="itself"):
+        approve_substitute(conn, store, part, part, reason="no")
+
+
+def test_approving_is_directional(env) -> None:  # type: ignore[no-untyped-def]
+    """B in place of A says nothing about A in place of B."""
+    _, conn, store = env
+    part = stored(store, conn, "REG-A", REGULATOR)
+    other = stored(store, conn, "REG-B", REGULATOR)
+
+    approve_substitute(conn, store, part, other, reason="same die, wider temperature range")
+
+    assert list_substitutions(conn, other.klm_id) == []
+
+
+def test_re_approving_replaces_and_re_compares(env) -> None:  # type: ignore[no-untyped-def]
+    _, conn, store = env
+    part = stored(store, conn, "REG-A", REGULATOR)
+    other = stored(store, conn, "REG-B", REGULATOR)
+
+    approve_substitute(conn, store, part, other, reason="first", now="2026-01-01T00:00:00Z")
+    approve_substitute(conn, store, part, other, reason="second", now="2026-02-01T00:00:00Z")
+
+    (record,) = list_substitutions(conn, part.klm_id)
+    assert record.reason == "second"
+    assert record.approved_at == "2026-02-01T00:00:00Z"
+
+
+def test_revoking_reports_whether_there_was_anything_to_revoke(env) -> None:  # type: ignore[no-untyped-def]
+    _, conn, store = env
+    part = stored(store, conn, "REG-A", REGULATOR)
+    other = stored(store, conn, "REG-B", REGULATOR)
+
+    assert revoke_substitute(conn, part.klm_id, other.klm_id) is False
+    approve_substitute(conn, store, part, other, reason="fine here")
+    assert revoke_substitute(conn, part.klm_id, other.klm_id) is True
+    assert list_substitutions(conn, part.klm_id) == []

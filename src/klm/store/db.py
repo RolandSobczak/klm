@@ -280,12 +280,33 @@ CREATE INDEX proposal_state ON proposal(state);
 """
 
 
+# An approved substitution: a human's judgement, recorded against a part, with
+# the mechanical verdict klm saw at the time. Directional on purpose — approving
+# B in place of A says nothing about A in place of B, because the part with the
+# tighter specification is not interchangeable in both directions. `reason` is
+# NOT NULL for the same purpose as a rejection's: the record has to say why, or
+# it is unreviewable a year later.
+_SUBSTITUTIONS = """
+CREATE TABLE substitution (
+    klm_id        TEXT NOT NULL,
+    substitute_id TEXT NOT NULL,
+    approved_at   TEXT NOT NULL,
+    approved_by   TEXT NOT NULL DEFAULT '',
+    reason        TEXT NOT NULL,
+    verdict       TEXT NOT NULL,     -- the mechanical status when approved
+    differences   TEXT NOT NULL DEFAULT '[]',   -- JSON: what klm saw then
+    PRIMARY KEY (klm_id, substitute_id)
+);
+"""
+
+
 MIGRATIONS: list[Migration] = [
     Migration(1, "initial schema", _INITIAL),
     Migration(2, "offer provenance columns", _OFFER_PROVENANCE),
     Migration(3, "per-part rotation corrections", _PART_ROTATION),
     Migration(4, "ordering: pins, thresholds, line provenance", _ORDERING),
     Migration(5, "the agent's review queue", _PROPOSALS),
+    Migration(6, "approved substitutions", _SUBSTITUTIONS),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1].version
