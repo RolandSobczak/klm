@@ -180,6 +180,13 @@ class DemandLine:
     offers: list[Offer] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
     """Which builds contributed, for `--explain`."""
+    alternates: list[Part] = field(default_factory=list)
+    """Approved substitutes worth buying instead, when this part cannot be.
+
+    Reported, never swapped in. klm knows the substitution was approved; it does
+    not know it was approved for *this* build, and quietly ordering a different
+    part than the BOM names is how the wrong component reaches a board.
+    """
 
     @property
     def mpn(self) -> str:
@@ -195,6 +202,8 @@ class DemandLine:
             lines.append(f"+ {self.spares} spares [{self.spares_rule}]")
         if self.order_qty != self.target:
             lines.append(f"→ {self.order_qty} after MOQ and order multiple")
+        for part in self.alternates:
+            lines.append(f"approved substitute {part.mpn} is orderable ({part.klm_id})")
         return lines
 
 
@@ -278,7 +287,31 @@ def _line(
     line.order_qty = min((o.order_qty(line.target) for o in offers), default=line.target)
     if line.target == 0:
         line.order_qty = 0
+    if line.order_qty and _unsourceable(offers):
+        line.alternates = _alternates(conn, klm_id)
     return line
+
+
+def _unsourceable(offers: list[Offer]) -> bool:
+    """No offer, or every offer says it has none.
+
+    Unknown stock is not zero (``Offer.in_stock``'s rule), so an offer that
+    never stated a figure keeps the part sourceable — reporting a substitute
+    for a part that is probably in stock trains people to ignore the report.
+    """
+    return not offers or all(o.stock is not None and o.stock <= 0 for o in offers)
+
+
+def _alternates(conn: sqlite3.Connection, klm_id: str) -> list[Part]:
+    from klm.services.substitutes import list_substitutions
+
+    found = []
+    for substitution in list_substitutions(conn, klm_id):
+        part = get_part(conn, substitution.substitute_id)
+        if part is None or _unsourceable(list_offers(conn, klm_id=part.klm_id)):
+            continue
+        found.append(part)
+    return found
 
 
 def _stock_for(conn: sqlite3.Connection, klm_id: str) -> tuple[int, str | None]:

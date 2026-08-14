@@ -450,6 +450,13 @@ def _add_research_parsers(sub: argparse._SubParsersAction[argparse.ArgumentParse
         "--all", action="store_true", help="Include candidates klm found differences in."
     )
     subs.add_argument("--format", choices=("text", "json"), default="text")
+    subs.add_argument("--approve", metavar="ID_OR_MPN", help="Record an approved substitution.")
+    subs.add_argument("--revoke", metavar="ID_OR_MPN", help="Drop an approved substitution.")
+    subs.add_argument("--reason", help="Why the substitution is acceptable. Required to approve.")
+    subs.add_argument("--by", default="", help="Who approved it.")
+    subs.add_argument(
+        "--approved", action="store_true", help="List this part's approved substitutions."
+    )
     subs.set_defaults(func=cmd_substitutes)
 
     sheet = sub.add_parser("datasheet", help="Fetch a datasheet, or read parameters out of one.")
@@ -2689,6 +2696,8 @@ def cmd_order_plan(args: argparse.Namespace) -> int:
 
         for line in result.unsourced:
             print(f"{_WARN} {line.mpn}: no enabled supplier stocks {line.order_qty}")
+            for alternate in line.alternates:
+                print(f"      approved substitute {alternate.mpn} is orderable")
 
         print()
         for supplier in sorted(result.carts):
@@ -3370,6 +3379,58 @@ def cmd_ask(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _substitution_admin(
+    conn: sqlite3.Connection, store: AssetStore, part: Part, args: argparse.Namespace
+) -> int:
+    """Approve, revoke or list the substitutions recorded against a part."""
+    from klm.services.substitutes import (
+        approve_substitute,
+        compare,
+        list_substitutions,
+        revoke_substitute,
+    )
+
+    if args.revoke:
+        other = _resolve_part(conn, args.revoke)
+        if revoke_substitute(conn, part.klm_id, other.klm_id):
+            print(f"{_OK} {other.mpn} is no longer approved in place of {part.mpn}")
+            return EXIT_OK
+        print(f"{_WARN} {other.mpn} was not approved in place of {part.mpn}")
+        return EXIT_CHECK_FAILED
+
+    if args.approve:
+        if not (args.reason or "").strip():
+            print(f"{_WARN} --reason is required: an approval nobody explained cannot be reviewed")
+            return EXIT_CHECK_FAILED
+        other = _resolve_part(conn, args.approve)
+        record = approve_substitute(
+            conn, store, part, other, reason=args.reason, approved_by=args.by
+        )
+        print(f"{_OK} {other.mpn} approved in place of {part.mpn}")
+        print(f"  klm's own verdict at approval: {record.verdict}")
+        for difference in record.differences:
+            print(f"    {difference}")
+        return EXIT_OK
+
+    records = list_substitutions(conn, part.klm_id)
+    for record in records:
+        approved = get_part(conn, record.substitute_id)
+        name = approved.mpn if approved else record.substitute_id
+        who = f" by {record.approved_by}" if record.approved_by else ""
+        print(f"{_OK} {name:<24} {record.approved_at}{who}")
+        print(f"      {record.reason}")
+        # Assets move. An approval recorded against a comparison that no longer
+        # holds is worth reporting, not silently honouring.
+        if approved is not None:
+            now = compare(store, part, approved)
+            if now.status != record.verdict:
+                print(f"      {_WARN} was {record.verdict} when approved, now {now.status}")
+    if not records:
+        print(f"{_INFO} nothing is approved in place of {part.mpn}")
+        return EXIT_CHECK_FAILED
+    return EXIT_OK
+
+
 def cmd_substitutes(args: argparse.Namespace) -> int:
     """What else in the catalog could go on the board instead.
 
@@ -3384,6 +3445,8 @@ def cmd_substitutes(args: argparse.Namespace) -> int:
     conn = connect(paths.db, create=False)
     try:
         part = _resolve_part(conn, args.part)
+        if args.approve or args.revoke or args.approved:
+            return _substitution_admin(conn, AssetStore(paths.assets), part, args)
         candidates = find_substitutes(
             conn, AssetStore(paths.assets), part, include_differing=args.all
         )

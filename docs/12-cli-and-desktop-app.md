@@ -100,6 +100,8 @@ AGENT
 ✓ klm datasheet extract <URL_OR_PART> --parameter NAME …  page + quote, or dropped
 ✓ klm ask <URL_OR_PART> "<question>"   Datasheet Q&A, with what it quoted
 ✓ klm substitutes <ID_OR_MPN> [--all]  Mechanically pin-compatible catalog parts
+✓ klm substitutes <ID_OR_MPN> --approve <ID_OR_MPN> --reason TEXT [--by NAME]
+✓ klm substitutes <ID_OR_MPN> --revoke <ID_OR_MPN> | --approved
 
 COST
 klm order plan --build "5xsensor-board:full,2xpsu-board" [--projects DIR] [--explain] [--save]

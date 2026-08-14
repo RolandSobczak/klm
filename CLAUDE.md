@@ -23,7 +23,8 @@ loop itself (`klm.llm.client`, `klm.research.agent`, `klm research run`), and th
 with cited extraction (`klm.services.datasheets`, `klm datasheet fetch|extract`), and the
 proposal queue with its review screen (`klm.services.proposals`, `klm research review`,
 `/api/proposals*`), and datasheet Q&A with substitute finding (`klm ask`, `klm substitutes`).
-**Every Phase 9 item is built.** Its done-criterion is *not* demonstrated: it needs a live
+**Every Phase 9 item is built**, and substitute *management* (approving, revoking and listing a
+substitution, reported by `klm order plan`) shipped after it. Its done-criterion is *not* demonstrated: it needs a live
 Anthropic key and live TME credentials, and this machine has neither — nothing in the agent or
 the TME v2 adapter has ever reached a real API.
 
@@ -137,6 +138,12 @@ These are the things that will bite an implementer who hasn't read the docs.
   Pin *names* are compared, not just numbers and types: two parts can share a footprint and a
   type map while pin 3 is `EN` on one and `GND` on the other. A missing asset is `unchecked`,
   never `compatible` — the QA gate's rule, where getting it wrong puts the wrong part on a board.
+- **An approved substitution is recorded, never applied.** `klm order plan` names an approved,
+  orderable substitute on a line no supplier can fill and stops there. klm knows the substitution
+  was approved; it does not know it was approved for *this* build. The record is directional (B
+  for A implies nothing about A for B), requires a reason like a rejected proposal does, and
+  stores the mechanical verdict *as it was at approval* — listing re-compares and flags a verdict
+  that has since changed.
 - **`klm ask` reports whether an answer quoted the datasheet at all.** Prose Q&A cannot demand a
   citation per sentence without losing the useful answers, so the honest move is to make an
   ungrounded answer visibly ungrounded rather than indistinguishable from a grounded one.
