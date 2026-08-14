@@ -228,10 +228,28 @@ Four properties, each of them a decision:
 Useful side effect of having all of this in one database:
 
 ```bash
-klm cost project sensor-board --qty 5     # BOM cost per board at qty 5, incl. fab
-klm cost history                          # spend over time, by supplier and category
-klm cost compare sensor-board rev-b rev-c # what a revision did to the cost
+klm cost project --project sensor-board --qty 5   # parts cost per board at qty 5
+klm cost history                                  # spend, by month, supplier and category
 ```
 
 Per-board cost at a given quantity is the number that decides whether a design change is worth
-it, and it's tedious enough to compute by hand that it usually doesn't get computed.
+it, and it's tedious enough to compute by hand that it usually doesn't get computed. The quantity
+is not a multiplier: each line is priced at the break its own run quantity reaches, which is
+where building five instead of one actually changes the answer.
+
+It is an estimate, and it is honest about what it leaves out:
+
+- **A line with no offer is reported, never counted as free.** A total quietly missing the
+  expensive connector is worse than no total; `--exit-code` makes an incomplete one fail CI.
+- **Currencies are never summed.** Totals come out per currency, because adding PLN to EUR
+  produces a figure wrong by the exchange rate and right-looking.
+- **Stock is not subtracted, and fabrication is not included.** This is what the parts cost, not
+  what this build costs you given the shelf — that is `klm order plan`'s question, and answering
+  both in one number answers neither.
+
+`klm cost history` counts placed orders only. A draft is a plan, and counting plans as spend makes
+the figure useless for the one thing it is for. Quantities are what was *ordered*: a discrepancy
+on receiving adjusts stock and is recorded on the line, but the money left the account either way.
+
+*Not built: comparing two revisions of a board (`klm cost compare`). It needs project history
+checked out at each revision, which is a different problem from pricing one.*
