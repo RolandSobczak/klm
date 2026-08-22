@@ -45,6 +45,7 @@ klm lint [--project .] [--fix] [--select …] [--format json]
 klm generate                     Rebuild generated/ from the catalog
 klm render <ID_OR_MPN> [--footprint] [--output FILE]   SVG; no KiCad needed
 klm export | klm import          SQLite ↔ YAML mirror
+klm import --from-kicad LIB [--library-dir DIR] [--model-dir DIR]
 klm register [--check]           KiCad lib tables + env vars
 
 SOURCING

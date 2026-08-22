@@ -11,7 +11,23 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-__all__ = ["Paths", "resolve_home"]
+__all__ = ["GITIGNORE", "Paths", "resolve_home"]
+
+#: What must not go into a shared catalog repository. `catalog/` and `assets/`
+#: are what a sync is *for*, so everything else here is either derived from them
+#: or local to this machine.
+GITIGNORE = """\
+# klm — what is worth sharing is catalog/ and assets/, and nothing else here.
+catalog.db
+catalog.db-wal
+catalog.db-shm
+generated/
+cache/
+
+# Names the environment variables holding supplier credentials, and is
+# machine-local anyway.
+config.toml
+"""
 
 
 def resolve_home(explicit: str | Path | None = None) -> Path:
@@ -145,9 +161,26 @@ class Paths:
         ]
 
     def create(self) -> None:
-        """Create every directory. Idempotent."""
+        """Create every directory, and the ignore file. Idempotent."""
         for directory in self.all_dirs():
             directory.mkdir(parents=True, exist_ok=True)
+        self.write_gitignore()
+
+    def write_gitignore(self) -> bool:
+        """Make the catalog safe to `git add .`. Returns True if it wrote.
+
+        Sharing a catalog between machines means putting `catalog/` and
+        `assets/` in a repository, and the natural way to do that adds
+        everything beside them: a binary database nothing can merge, a build
+        directory that is regenerated anyway, a cache of datasheet PDFs, and a
+        config file naming the environment variables that hold credentials.
+        An existing file is left alone — it is the user's.
+        """
+        target = self.home / ".gitignore"
+        if target.exists():
+            return False
+        target.write_text(GITIGNORE, encoding="utf-8", newline="\n")
+        return True
 
     def exists(self) -> bool:
         """True if this looks like an initialised catalog."""

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from klm import __version__
+from klm.assets.kicad_libs import find_libraries
 from klm.assets.qa import QaReport, QaStatus, check_model3d
 from klm.cad.freecad import FreeCadUnavailable, convert_mesh
 from klm.config import Config, load_config
@@ -99,6 +100,7 @@ from klm.services.sync import (
 from klm.services.vendor import VendorError, VendorPlan, plan_vendor, unvendor, vendor
 from klm.services.verify import to_json, verify_clean_room
 from klm.store import AssetKind, AssetStore, Paths, connect, migrate
+from klm.store.assets import AssetError
 from klm.store.db import SCHEMA_VERSION, user_version
 from klm.suppliers.base import SupplierAdapter
 from klm.suppliers.lcsc import is_lcsc_pn, product_url
@@ -173,6 +175,21 @@ def build_parser() -> argparse.ArgumentParser:
         choices=[str(s) for s in PartStatus],
         default=str(PartStatus.DRAFT),
         help="Status for imported parts (default: draft).",
+    )
+    importer.add_argument(
+        "--library-dir",
+        metavar="DIR",
+        action="append",
+        default=[],
+        help="Also search here for the footprint each symbol names "
+        "(a directory of .pretty libraries). Repeatable.",
+    )
+    importer.add_argument(
+        "--model-dir",
+        metavar="DIR",
+        action="append",
+        default=[],
+        help="Where the 3D models live. Defaults to <library-dir>/../3dmodels.",
     )
     importer.add_argument(
         "--category",
@@ -877,6 +894,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             print(f"{_OK} schema         version {version}")
 
         problems += _report_catalog(conn)
+        problems += _report_missing_assets(conn, paths)
     except sqlite3.DatabaseError as exc:
         print(f"{_FAIL} catalog        unreadable: {exc}")
         return EXIT_CHECK_FAILED
@@ -923,6 +941,47 @@ def _report_catalog(conn: sqlite3.Connection) -> int:
         problems += 1
 
     return problems
+
+
+def _report_missing_assets(conn: sqlite3.Connection, paths: Paths) -> int:
+    """Parts whose assets are not on this disk.
+
+    The check exists for one failure in particular: `part.yaml` records a
+    content hash, not the bytes, so a catalog repository that carries
+    `catalog/` without `assets/` imports cleanly and produces parts with no
+    symbol. Silence here would be the last chance to notice.
+    """
+    store = AssetStore(paths.assets)
+    kinds = (
+        ("symbol_hash", AssetKind.SYMBOL),
+        ("footprint_hash", AssetKind.FOOTPRINT),
+        ("model3d_hash", AssetKind.MODEL3D),
+    )
+    missing: list[tuple[str, str]] = []
+    for column, kind in kinds:
+        rows = conn.execute(
+            f"SELECT klm_id, {column} FROM part WHERE {column} IS NOT NULL"
+        ).fetchall()
+        missing.extend(
+            (row["klm_id"], kind.value) for row in rows if not _stored(store, row[column], kind)
+        )
+
+    if not missing:
+        return 0
+    print(f"{_FAIL} assets         {len(missing)} referenced file(s) are not in the store")
+    for klm_id, label in missing[:5]:
+        print(f"    {klm_id}: {label}")
+    print("    → the catalog was copied without assets/; copy it, or re-acquire")
+    return 1
+
+
+def _stored(store: AssetStore, content_hash: str, kind: AssetKind) -> bool:
+    """A hash that is not even well formed is missing, not a crash: it came
+    out of a `part.yaml` somebody could have edited."""
+    try:
+        return store.exists(content_hash, kind)
+    except AssetError:
+        return False
 
 
 def _report_assets(paths: Paths, *, deep: bool) -> int:
@@ -1046,6 +1105,11 @@ def _import_from_kicad(paths: Paths, args: argparse.Namespace) -> int:
         print(f"klm: no such file: {source}", file=sys.stderr)
         return EXIT_ERROR
 
+    extra = tuple(Path(d).expanduser() for d in args.library_dir)
+    libraries = find_libraries(extra=extra) if extra else None
+    model_dirs = [Path(d).expanduser() for d in args.model_dir]
+    model_dirs.extend(d.parent / "3dmodels" for d in extra)
+
     config = load_config(paths.config)
     store = AssetStore(paths.assets)
     conn = connect(paths.db, create=False)
@@ -1057,16 +1121,23 @@ def _import_from_kicad(paths: Paths, args: argparse.Namespace) -> int:
             config=config,
             status=PartStatus(args.status),
             category=args.category,
+            libraries=libraries,
+            model_dirs=[d for d in model_dirs if d.is_dir()],
         )
     finally:
         conn.close()
 
+    with_footprint = sum(1 for item in report.imported if item.footprint)
     print(
         f"{_OK} imported {len(report.imported)} symbol(s) from {source.name}: "
         f"{report.created} created, {report.updated} updated"
     )
+    if libraries is not None:
+        print(f"{_OK} footprints     {with_footprint}/{len(report.imported)} resolved")
     for name, reason in report.skipped:
         print(f"{_WARN} skipped {name}: {reason}")
+    for name, missing in report.unresolved:
+        print(f"{_WARN} {name}: {missing}")
     print()
     print("Next: klm lint --select S002,V001 --fix --dry-run")
     return EXIT_OK if report.ok else EXIT_CHECK_FAILED

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from klm.assets.kicad_libs import KicadLibraries
 from klm.config import Config, ConfigError, FieldConfig, LintConfig, default_aliases, load_config
 from klm.kicad import symbols as sym
 from klm.kicad.sexpr import dumps, loads
@@ -26,6 +27,7 @@ from klm.store.paths import Paths
 
 FIXTURES = Path(__file__).parent / "fixtures"
 DRIFTED = FIXTURES / "drifted_library.kicad_sym"
+KICAD = FIXTURES / "kicad"
 
 
 @pytest.fixture
@@ -68,6 +70,59 @@ def test_derived_symbols_are_skipped_rather_than_half_imported(
     assert [name for name, _ in report.skipped] == ["R_Small_Derived"]
     assert "extends" in report.skipped[0][1]
     assert not report.ok
+
+
+def _library_with_footprint(tmp_path: Path, lib_id: str) -> Path:
+    """A one-symbol library whose `Footprint` field names ``lib_id``."""
+    text = DRIFTED.read_text(encoding="utf-8")
+    document = loads(text)
+    symbol = sym.extract_symbols(document)[0]
+    for prop in symbol.find_all("property"):
+        if len(prop) >= 3 and getattr(prop[1], "value", None) == "Footprint":
+            prop[2].value = lib_id
+    target = tmp_path / "one.kicad_sym"
+    target.write_text(dumps(document), encoding="utf-8")
+    return target
+
+
+def test_import_takes_the_footprint_and_model_the_symbol_names(
+    env: tuple[Paths, sqlite3.Connection, AssetStore], tmp_path: Path
+) -> None:
+    """A catalog of symbols alone is one whose parts break on another machine."""
+    _, conn, store = env
+    source = _library_with_footprint(tmp_path, "Resistor_SMD:R_0402_1005Metric")
+    libraries = KicadLibraries(footprint_dirs=(KICAD / "footprints",))
+
+    report = import_symbol_library(
+        conn,
+        store,
+        source,
+        config=config(),
+        libraries=libraries,
+        model_dirs=[KICAD / "3dmodels" / "Resistor_SMD.3dshapes"],
+    )
+
+    part = _by_mpn(conn, "RC0402FR-074K7L")
+    assert part.footprint_hash and part.model3d_hash
+    assert report.imported[0].footprint == "Resistor_SMD:R_0402_1005Metric"
+    stored = store.read_text(part.footprint_hash, AssetKind.FOOTPRINT)
+    assert "${KLM_3DMODELS}/R_0402_1005Metric.step" in stored, "the recorded path was local"
+    assert "R_4k7" not in {name for name, _ in report.unresolved}
+
+
+def test_a_footprint_that_cannot_be_found_is_reported_not_swallowed(
+    env: tuple[Paths, sqlite3.Connection, AssetStore], tmp_path: Path
+) -> None:
+    _, conn, store = env
+    source = _library_with_footprint(tmp_path, "Nowhere:NoSuchThing")
+
+    report = import_symbol_library(
+        conn, store, source, config=config(), libraries=KicadLibraries()
+    )
+
+    assert _by_mpn(conn, "RC0402FR-074K7L").footprint_hash is None, "still worth having"
+    missing = dict(report.unresolved)
+    assert "Nowhere:NoSuchThing" in missing["R_4k7"]
 
 
 def test_aliased_fields_are_read_but_not_rewritten(
