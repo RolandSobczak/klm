@@ -113,6 +113,17 @@ These are the things that will bite an implementer who hasn't read the docs.
 - **A QA check that cannot run is `unchecked`, never `pass`.** A green report meaning "I didn't
   look" is worse than no report. See `assets/qa.py` — the aggregate status is `unchecked` when
   every result was skipped.
+- **A shared catalog is `catalog/` plus `assets/`, and nothing else.** `part.yaml` records an
+  asset's content hash, not its bytes, so a repository carrying `catalog/` alone imports cleanly
+  and produces parts with no symbol — a failure shaped like a success. `klm doctor` fails on a
+  referenced asset that is not on this disk, and `klm init` writes a `.gitignore` so the natural
+  `git add .` does not sweep in the database, `generated/`, the datasheet cache or `config.toml`.
+  The mirror carries parts only: offers, orders, stock and the event log stay on one bench.
+- **`klm import --from-kicad` imports a part, not a symbol.** Given `--library-dir` it also takes
+  the footprint the symbol's `Footprint` field names and the model that footprint references,
+  resolving the model by basename because the recorded path was written on another machine. What
+  it could not find is named per symbol; a footprint from KiCad's own libraries is left
+  unresolved on purpose, since those ship with KiCad everywhere.
 - **Symbols are never shared between parts; footprints and 3D models are.** A symbol carries the
   part's own name and `Value`. Catalog reuse applies to the other two kinds, and that is what keeps
   fifty 0402 resistors from creating fifty footprints.

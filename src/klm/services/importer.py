@@ -16,26 +16,41 @@ Two decisions worth stating:
   matched on manufacturer + MPN. Re-importing a library updates those parts
   rather than duplicating them, and importing the same symbol from every
   project that copied it converges on one part.
+* **A part is its symbol, its footprint and its model.** Given somewhere to look
+  (`libraries`), import also takes the footprint the symbol's `Footprint` field
+  names and the 3D model that footprint references, because a catalog holding
+  symbols alone is one whose parts stop working the moment they leave this
+  machine. What could not be found is *reported* — an unresolved footprint is
+  the thing the user has to know about, so it is never silently skipped.
 """
 
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from klm import fields as field_schema
 from klm import ids
+from klm.assets.kicad_libs import KicadLibraries
+from klm.assets.qa import check_footprint, check_model3d
 from klm.config import Config, FieldConfig
+from klm.kicad import footprints as fp
 from klm.kicad import symbols as sym
-from klm.kicad.sexpr import SExp, dumps_canonical, loads
+from klm.kicad.sexpr import Atom, SExp, dumps_canonical, loads
 from klm.model import Confidence, Parameter, Part, PartStatus, SourceKind
+from klm.services.assets import AssetOrigin, register_asset
 from klm.services.catalog import find_by_mpn, get_part, save_part
+from klm.services.register import MODELS_VAR
 from klm.store.assets import AssetKind, AssetStore
 
 __all__ = ["ImportReport", "ImportedSymbol", "import_symbol", "import_symbol_library"]
 
 UNKNOWN_MANUFACTURER = "Unknown"
+
+#: Tried in order when a footprint names a model klm cannot use as it stands.
+_STEP_SUFFIXES = (".step", ".stp", ".STEP", ".STP")
 
 
 @dataclass
@@ -44,6 +59,9 @@ class ImportedSymbol:
     klm_id: str
     created: bool
     """False when the symbol matched a part already in the catalog."""
+    footprint: str | None = None
+    """The `Library:Name` whose land pattern was taken, if one was found."""
+    model3d: str | None = None
 
 
 @dataclass
@@ -52,6 +70,13 @@ class ImportReport:
     imported: list[ImportedSymbol] = field(default_factory=list)
     skipped: list[tuple[str, str]] = field(default_factory=list)
     """``(symbol name, reason)`` — reported, never guessed at."""
+    unresolved: list[tuple[str, str]] = field(default_factory=list)
+    """``(symbol name, what was missing)`` for a part imported without an asset.
+
+    A part with no footprint is still worth having; a part with no footprint
+    nobody was told about is how a synced catalog turns out to be unusable on
+    the machine that pulled it.
+    """
 
     @property
     def created(self) -> int:
@@ -74,6 +99,8 @@ def import_symbol_library(
     config: Config | None = None,
     status: PartStatus = PartStatus.DRAFT,
     category: str | None = None,
+    libraries: KicadLibraries | None = None,
+    model_dirs: Sequence[Path] = (),
 ) -> ImportReport:
     """Import every symbol in a `.kicad_sym` file as a part."""
     schema = (config or Config()).fields
@@ -94,7 +121,16 @@ def import_symbol_library(
             continue
         try:
             imported = import_symbol(
-                conn, store, symbol, name, schema=schema, status=status, category=category
+                conn,
+                store,
+                symbol,
+                name,
+                schema=schema,
+                status=status,
+                category=category,
+                libraries=libraries,
+                model_dirs=model_dirs,
+                report=report,
             )
         except (ValueError, sqlite3.DatabaseError) as exc:
             # One unimportable symbol must not cost the other two hundred.
@@ -118,6 +154,9 @@ def import_symbol(
     schema: FieldConfig | None = None,
     status: PartStatus = PartStatus.DRAFT,
     category: str | None = None,
+    libraries: KicadLibraries | None = None,
+    model_dirs: Sequence[Path] = (),
+    report: ImportReport | None = None,
 ) -> ImportedSymbol:
     """Import one symbol node as a part.
 
@@ -148,6 +187,16 @@ def import_symbol(
 
     symbol_hash = store.add_bytes(dumps_canonical(symbol).encode("utf-8"), AssetKind.SYMBOL)
 
+    lib_id = resolved.get("Footprint", "").strip()
+    acquired = (
+        _acquire(conn, store, lib_id, libraries, model_dirs, symbol)
+        if libraries is not None and not (existing and existing.footprint_hash)
+        else _Acquired()
+    )
+    if libraries is not None and report is not None:
+        for missing in acquired.missing:
+            report.unresolved.append((name, missing))
+
     part = Part(
         klm_id=klm_id,
         # The symbol name is the fallback MPN: for a library of hand-drawn
@@ -160,13 +209,19 @@ def import_symbol(
         status=existing.status if existing else status,
         datasheet_url=_datasheet(resolved),
         symbol_hash=symbol_hash,
-        footprint_hash=existing.footprint_hash if existing else None,
-        model3d_hash=existing.model3d_hash if existing else None,
+        footprint_hash=acquired.footprint or (existing.footprint_hash if existing else None),
+        model3d_hash=acquired.model3d or (existing.model3d_hash if existing else None),
         parameters=_parameters(raw, schema, name),
         created_at=existing.created_at if existing else None,
     )
     save_part(conn, part)
-    return ImportedSymbol(name=name, klm_id=klm_id, created=existing is None)
+    return ImportedSymbol(
+        name=name,
+        klm_id=klm_id,
+        created=existing is None,
+        footprint=lib_id if acquired.footprint else None,
+        model3d=acquired.model_name,
+    )
 
 
 def _resolve_fields(raw: dict[str, str], schema: FieldConfig) -> dict[str, str]:
@@ -229,3 +284,109 @@ def _parameters(raw: dict[str, str], schema: FieldConfig, symbol_name: str) -> l
             )
         )
     return parameters
+
+
+# ---------------------------------------------------------------------------
+# Footprints and models the symbol points at
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Acquired:
+    footprint: str | None = None
+    model3d: str | None = None
+    model_name: str | None = None
+    missing: list[str] = field(default_factory=list)
+
+
+def _acquire(
+    conn: sqlite3.Connection,
+    store: AssetStore,
+    lib_id: str,
+    libraries: KicadLibraries,
+    model_dirs: Sequence[Path],
+    symbol: SExp,
+) -> _Acquired:
+    """Take the land pattern the symbol names, and the model it references.
+
+    Nothing is invented: an unresolvable `Library:Name`, a missing `.kicad_mod`
+    or a model file that is not on this machine are all recorded in ``missing``
+    and the part is imported without that asset.
+    """
+    result = _Acquired()
+    if not lib_id or ":" not in lib_id:
+        result.missing.append(
+            f"footprint field {lib_id!r} names no library" if lib_id else "no footprint field"
+        )
+        return result
+
+    node = libraries.find_footprint(lib_id)
+    if node is None:
+        result.missing.append(f"footprint {lib_id} was not found in the libraries searched")
+        return result
+
+    # Read the model reference before rewriting it: the original path is the
+    # only thing that says which file on disk this footprint means.
+    source = _model_source(node, model_dirs)
+    name = lib_id.split(":", 1)[1]
+
+    if source is None:
+        fp.remove_model_nodes(node)
+        result.missing.append(f"{lib_id} references no 3D model klm could find")
+    else:
+        data = source.read_bytes()
+        result.model3d = store.add_bytes(data, AssetKind.MODEL3D)
+        result.model_name = source.stem
+        fp.rewrite_model_paths(node, env_var=MODELS_VAR, filename=f"{name}.step")
+        register_asset(
+            conn,
+            result.model3d,
+            AssetKind.MODEL3D,
+            filename=name,
+            source=AssetOrigin.IMPORTED,
+            qa=check_model3d(data),
+        )
+
+    result.footprint = store.add_bytes(
+        dumps_canonical(node).encode("utf-8"), AssetKind.FOOTPRINT
+    )
+    register_asset(
+        conn,
+        result.footprint,
+        AssetKind.FOOTPRINT,
+        filename=name,
+        source=AssetOrigin.IMPORTED,
+        qa=check_footprint(node, symbol=symbol),
+    )
+    return result
+
+
+def _model_source(node: SExp, model_dirs: Sequence[Path]) -> Path | None:
+    """Resolve a footprint's `(model ...)` path against the directories given.
+
+    The recorded path is usually absolute and usually wrong — it was written on
+    whichever machine drew the footprint. The basename is the part of it that
+    travels, so that is what is looked up.
+
+    A reference to a `.wrl` is followed to the STEP beside it: KiCad ships both
+    and names them identically, and a mesh is not something klm can put in a
+    STEP-shaped slot.
+    """
+    for model in node.find_all("model"):
+        if len(model) < 2 or not isinstance(model[1], Atom):
+            continue
+        raw = model[1].value
+        direct = Path(raw)
+        if not raw.startswith("${") and direct.is_file():
+            return direct
+        name = PurePath(raw.replace("\\", "/")).name
+        stem = PurePath(name).stem
+        wanted = [f"{stem}{ext}" for ext in _STEP_SUFFIXES]
+        if PurePath(name).suffix.lower() in (".step", ".stp"):
+            wanted.insert(0, name)
+        for directory in model_dirs:
+            for candidate in wanted:
+                path = directory / candidate
+                if path.is_file():
+                    return path
+    return None

@@ -14,8 +14,9 @@ from tests.projects import make_project, schematic, seed_resistor
 from klm.assets.kicad_libs import default_libraries
 from klm.cad.freecad import FreeCadUnavailable
 from klm.cli.main import EXIT_CHECK_FAILED, EXIT_ERROR, EXIT_OK, main, parse_age
-from klm.model import PartStatus
-from klm.services.catalog import get_part, list_parts
+from klm.ids import new_id
+from klm.model import Part, PartStatus
+from klm.services.catalog import get_part, list_parts, save_part
 from klm.services.stock import adjust
 from klm.store import AssetKind, AssetStore, Paths, connect, resolve_home
 from klm.store.db import SCHEMA_VERSION
@@ -124,6 +125,19 @@ def test_init_creates_the_layout_and_schema(home: Path, capsys: pytest.CaptureFi
     assert "catalog created" in capsys.readouterr().out
 
 
+def test_init_writes_an_ignore_file_and_never_overwrites_one(home: Path) -> None:
+    """A shared catalog is `catalog/` and `assets/`; the rest must not travel."""
+    assert main(["init"]) == EXIT_OK
+
+    ignore = Paths(home).home / ".gitignore"
+    assert "catalog.db" in ignore.read_text(encoding="utf-8")
+    assert "cache/" in ignore.read_text(encoding="utf-8")
+
+    ignore.write_text("mine\n", encoding="utf-8")
+    assert Paths(home).write_gitignore() is False
+    assert ignore.read_text(encoding="utf-8") == "mine\n"
+
+
 def test_init_is_safe_to_repeat(home: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["init"]) == EXIT_OK
     capsys.readouterr()
@@ -224,6 +238,22 @@ def test_doctor_counts_assets(home: Path, capsys: pytest.CaptureFixture[str]) ->
     main(["doctor"])
     out = capsys.readouterr().out
     assert "2 (" in out and "footprint" in out
+
+
+def test_doctor_reports_a_part_whose_asset_is_not_on_this_disk(
+    home: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`part.yaml` carries a hash, not the bytes — a catalog copied without
+    `assets/` imports cleanly and produces parts with no symbol."""
+    main(["init"])
+    conn = connect(Paths(home).db, create=False)
+    part = Part(klm_id=new_id(), mpn="X", manufacturer="Y", symbol_hash="sha256:" + "de" * 32)
+    save_part(conn, part)
+    conn.close()
+    capsys.readouterr()
+
+    assert main(["doctor"]) == EXIT_CHECK_FAILED
+    assert "not in the store" in capsys.readouterr().out
 
 
 def test_doctor_deep_detects_a_corrupted_asset(

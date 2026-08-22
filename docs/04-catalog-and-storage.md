@@ -186,6 +186,31 @@ Export determinism rules — these are what make git history usable:
 
 A property test asserts `export(import(export(db))) == export(db)` byte-for-byte.
 
+### Sharing a catalog between machines
+
+The mirror is what makes a catalog a git repository, and one rule governs the whole arrangement:
+
+**`catalog/` and `assets/` travel together; nothing else in `$KLM_HOME` travels at all.**
+
+`part.yaml` records an asset's content *hash*, not its bytes. A repository carrying `catalog/`
+alone imports without a single error and produces parts with no symbol — the worst shape a
+failure can take, because it looks like success. `klm doctor` checks for exactly this and fails:
+a referenced asset that is not on this disk is reported, never passed over.
+
+`klm init` writes a `.gitignore` for the rest, because the natural `git add .` sweeps up a binary
+database nothing can merge, a `generated/` directory that is rebuilt from the catalog anyway, a
+cache of datasheet PDFs, and a `config.toml` naming the environment variables that hold supplier
+credentials. An existing `.gitignore` is left alone — it is the user's file.
+
+```bash
+klm export && git add catalog assets && git commit && git push      # this machine
+git clone <repo> ~/.local/share/klm && klm import && klm generate   # the next one
+```
+
+What the mirror does **not** carry is as important: offers, orders, stock, approved
+substitutions and the event log live in the database only. Sharing a catalog shares the library,
+not the purchase history — the second is a record of one bench.
+
 ## 4. Asset storage and deduplication
 
 Assets are content-addressed: the filename *is* the hash of the canonical bytes.
@@ -200,6 +225,25 @@ Canonicalization before hashing matters: two byte-different files that mean the 
 share a hash. For footprints and symbols, canonicalize via the S-expression writer (stable
 formatting, sorted attributes, fixed float precision) before hashing. For STEP, hash the file as-is
 — STEP contains generation timestamps, so klm strips the header lines that vary before hashing.
+
+### Importing an existing library
+
+`klm import --from-kicad` is the on-ramp, and it takes a *part*, not a symbol: given
+`--library-dir`, it also stores the footprint the symbol's `Footprint` field names and the 3D
+model that footprint references. A catalog of symbols alone is one whose parts stop working the
+moment they leave the machine they were imported on.
+
+Three rules, all of them the same rule:
+
+- **A footprint that cannot be found is reported, not invented.** The part is still imported —
+  it is worth having — but the missing land pattern is named, per symbol.
+- **The model reference is resolved by basename**, against `--model-dir` (defaulting to
+  `<library-dir>/../3dmodels`). The path a footprint records is usually absolute and usually
+  wrong, having been written on whichever machine drew it. A reference to a `.wrl` is followed to
+  the STEP beside it, since a mesh does not belong in a STEP-shaped slot.
+- **A footprint from KiCad's own libraries is deliberately left unresolved** when KiCad is not
+  installed. Those ship with KiCad on every machine, so copying them into the catalog buys
+  nothing; the symbol keeps naming them and KiCad finds them.
 
 ### 3D models and git
 
